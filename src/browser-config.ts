@@ -147,10 +147,10 @@ export const BROWSERS: { [key: string]: BrowserConfig } = {
   }),
 }
 
-// Usage Example:
-const browser = BROWSERS['chrome']
-const downloadUrl = browser.getDownloadUrl('mac', '120.0.6099.109', 'arm64')
-const installPath = browser.getInstallPath('mac', '/Applications')
-const executable = browser.getExecutable('mac', installPath)
-
-console.log({ downloadUrl, installPath, executable })
+/**
+  const browser = BROWSERS['chrome']
+  const downloadUrl = browser.getDownloadUrl('mac', '120.0.6099.109', 'arm64')
+  const installPath = browser.getInstallPath('mac', '/Applications')
+  const executable = browser.getExecutable('mac', installPath)
+  console.log({ downloadUrl, installPath, executable })
+ */

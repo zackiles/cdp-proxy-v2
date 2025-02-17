@@ -1,162 +1,85 @@
-### **CDP Websocket Session Management - `flatten: true` vs`flatten: true`**  
-This example follows **step-by-step** how to **connect to a fresh Chrome instance, create a browser context, open a page, and navigate that page** using **traditional (non-flattened) CDP**, and then compares **how it would work with `flatten: true`** at each step.
+**Guide on CDP WebSocket and Session Management (With Examples)**
+
+Chrome DevTools Protocol (CDP) allows external tools to automate Chrome or Chromium-based browsers. Communication happens through one or more WebSocket connections, and each connection can manage one or many “sessions.” A session identifies the debugging context (tab, iframe, worker, or browser-level operations) that a set of commands should apply to.
+
+Below is an overview of how these WebSockets and sessions work, with examples for both the default (non-flattened) approach and the flattened approach.
 
 ---
 
-## **Step 1: Start a Fresh Chrome Instance and Get the Browser WebSocket URL**
-Run **headless Chrome**:
-```sh
-chrome --remote-debugging-port=9222 --headless=new
-```
-Query Chrome’s **version endpoint** to retrieve the WebSocket URL:
-```
-GET http://localhost:9222/json/version
-```
-Example response:
-```json
-{
-  "webSocketDebuggerUrl": "ws://localhost:9222/devtools/browser/2B89D8C3-5F39-4A12-8D55-90B68D2C64E2"
-}
-```
-- This WebSocket (`/devtools/browser/...`) is **only for browser-wide operations**.
+**General Concepts**
 
-### **🚀 If Using `flatten: true`:**
-✅ **No change** at this step. You still need to connect to the **browser WebSocket**.
+• **WebSocket Endpoints**  
+  - **Browser** endpoint: `ws://localhost:9222/devtools/browser/<UUID>`  
+    Used for high-level, browser-wide commands such as creating targets, listing tabs, or retrieving system info.  
+  - **Page** endpoint: `ws://localhost:9222/devtools/page/<UUID>`  
+    Used for commands specific to a single tab or frame (e.g., DOM, network interception, JavaScript evaluation).
+
+• **Targets**  
+  A target represents any debuggable context. It has a unique `targetId`. A page, iframe, or worker each qualifies as a “target.”
+
+• **Sessions**  
+  When you attach to a target, Chrome returns a `sessionId` that you use for sending commands specific to that target.
+
+• **Flatten Mode**  
+  Flatten mode (`flatten: true`) eliminates the need to open multiple WebSocket connections. You can stay on one WebSocket (usually the browser’s) and route commands to different sessions by including the appropriate `sessionId`.
 
 ---
 
-## **Step 2: Open a WebSocket Connection to the Browser**
-Now, open a **WebSocket connection** to:
-```
-ws://localhost:9222/devtools/browser/2B89D8C3-5F39-4A12-8D55-90B68D2C64E2
-```
-- This lets us issue **browser-wide** commands.
+**Default (Non-Flattened) Approach**
 
-### **🚀 If Using `flatten: true`:**
-✅ **No change** at this step. You still connect to the **browser WebSocket**.
+• You often open two WebSockets:  
+  1. One to the browser endpoint, which lets you create or list targets via `Target.createTarget`, `Target.getTargets`, etc.  
+  2. One to the page endpoint, which you retrieve from an HTTP call to `http://localhost:9222/json` or `json/list`, then connect to `ws://localhost:9222/devtools/page/<PAGE_UUID>`.
 
----
-
-## **Step 3: Create a New Browser Context**
-Send the following command to create a **new browser context**:
+• Browser-level commands go to the **browser** WebSocket:
 ```json
 {
   "id": 1,
-  "method": "Target.createBrowserContext"
+  "method": "Browser.getVersion"
 }
 ```
-Example response:
+• Page-level commands go to the **page** WebSocket:
 ```json
 {
   "id": 1,
-  "result": {
-    "browserContextId": "BROWSER_CONTEXT_1"
-  }
-}
-```
-- `BROWSER_CONTEXT_1` is an **isolated browsing session**.
-
-### **🚀 If Using `flatten: true`:**
-✅ **No change** at this step. The browser context creation is the same.
-
----
-
-## **Step 4: Create a New Page in This Context**
-Send a command to **create a new page**:
-```json
-{
-  "id": 2,
-  "method": "Target.createTarget",
-  "params": {
-    "url": "about:blank",
-    "browserContextId": "BROWSER_CONTEXT_1"
-  }
-}
-```
-Example response:
-```json
-{
-  "id": 2,
-  "result": {
-    "targetId": "TARGET_PAGE_1"
-  }
-}
-```
-- The new page exists with `targetId: TARGET_PAGE_1`, but **we cannot interact with it yet**.
-
-### **🚀 If Using `flatten: true`:**
-✅ **No change** at this step. The page is created the same way.
-
----
-
-## **Step 5: Get the Page's WebSocket URL**
-Since `TARGET_PAGE_1` is now created, we need to find its **WebSocket URL**.  
-To do this, call:
-```
-GET http://localhost:9222/json
-```
-Example response:
-```json
-[
-  {
-    "id": "TARGET_PAGE_1",
-    "type": "page",
-    "webSocketDebuggerUrl": "ws://localhost:9222/devtools/page/7DFA92E3-1B47-4215-9D8C-8F1E90BFD12E"
-  }
-]
-```
-- The WebSocket URL for the page is:
-  ```
-  ws://localhost:9222/devtools/page/7DFA92E3-1B47-4215-9D8C-8F1E90BFD12E
-  ```
-- **We must open a new WebSocket connection to this URL to control the page.**
-
-### **🚀 If Using `flatten: true`:**
-🚨 **This step is skipped entirely!**  
-✅ You **do not need to fetch a WebSocket URL for the page**.  
-✅ You **do not need to open a second WebSocket connection**.  
-👉 Instead, **all interactions happen via the same browser WebSocket, using `sessionId`**.
-
----
-
-## **Step 6: Open a WebSocket Connection to the Page**
-Now, **disconnect from the browser WebSocket** and **open a new WebSocket connection** to:
-```
-ws://localhost:9222/devtools/page/7DFA92E3-1B47-4215-9D8C-8F1E90BFD12E
-```
-- This WebSocket **only controls this page**.
-
-### **🚀 If Using `flatten: true`:**
-🚨 **This step is skipped entirely!**  
-✅ You continue using the **same browser WebSocket**.  
-✅ **No need to switch WebSockets**.
-
----
-
-## **Step 7: Navigate the Page**
-Since we're connected to the **page's WebSocket**, send:
-```json
-{
-  "id": 3,
   "method": "Page.navigate",
   "params": {
     "url": "https://example.com"
   }
 }
 ```
-Example response:
+• If you need to attach to an iframe, you call `Target.attachToTarget` on the page WebSocket (or still on the browser WebSocket) and specify `sessionId` in subsequent commands for that iframe. This can create nested sessions inside the same page connection.
+
+---
+
+**Flattened Approach**
+
+• You can stay on the **browser** WebSocket only (e.g., `ws://localhost:9222/devtools/browser/<UUID>`).  
+• When creating or discovering a page target, call `Target.attachToTarget` with `"flatten": true`. Instead of switching to a new page WebSocket, you get a `sessionId`. You use that `sessionId` for page-level commands.  
+• All commands—browser-wide or page-specific—flow through the **same** WebSocket, distinguished by which `sessionId` is present.
+
+Example of creating a page and navigating it, all from the browser WebSocket, using flatten mode:
 ```json
 {
-  "id": 3,
-  "result": {
-    "frameId": "FRAME_1"
+  "id": 1,
+  "method": "Target.createTarget",
+  "params": {
+    "url": "about:blank"
   }
 }
 ```
-- The page has successfully navigated to `https://example.com`.
-
-### **🚀 If Using `flatten: true`:**
-✅ The **same command is sent**, but **via the browser WebSocket** with `sessionId` included:  
+Suppose it returns `targetId: "TARGET_PAGE_1"`. Attach with flatten:
+```json
+{
+  "id": 2,
+  "method": "Target.attachToTarget",
+  "params": {
+    "targetId": "TARGET_PAGE_1",
+    "flatten": true
+  }
+}
+```
+Suppose that returns `sessionId: "SESSION_PAGE_1"`. Now navigate:
 ```json
 {
   "id": 3,
@@ -167,25 +90,123 @@ Example response:
   }
 }
 ```
-- **No need for a separate WebSocket!**
-- **All interactions remain within the same connection.**
 
 ---
 
-## **Comparison Summary**
-| Step | Without `flatten: true` | With `flatten: true` |
-|------|--------------------|----------------|
-| **1. Get Browser WebSocket** | `GET /json/version` | Same |
-| **2. Connect to Browser** | Open WebSocket to `/devtools/browser/...` | Same |
-| **3. Create Context** | `Target.createBrowserContext` | Same |
-| **4. Create Page** | `Target.createTarget` | Same |
-| **5. Get Page WebSocket** | `GET /json` to find `/devtools/page/...` | ❌ **Not needed** |
-| **6. Connect to Page WebSocket** | Open WebSocket to `/devtools/page/...` | ❌ **Not needed** |
-| **7. Navigate Page** | Send `Page.navigate` via the page WebSocket | ✅ **Send `Page.navigate` via the browser WebSocket with `sessionId`** |
+**Examples**
+
+**Example 1: Non-Flattened Flow**  
+
+1. Launch Chrome with remote debugging:
+  ```
+  chrome --remote-debugging-port=9222 --headless
+  ```
+2. Get the browser WebSocket URL:
+  ```
+  GET http://localhost:9222/json/version
+  ```
+  Returns something like:
+  ```
+  {
+    "webSocketDebuggerUrl": "ws://localhost:9222/devtools/browser/ABCD-1234"
+  }
+  ```
+3. Connect to the browser WebSocket.
+4. Create a new browser context:
+  ```json
+  {
+    "id": 1,
+    "method": "Target.createBrowserContext"
+  }
+  ```
+  Suppose it returns `"browserContextId": "BROWSER_CTX_1"`.
+5. Create a new page within that context:
+  ```json
+  {
+    "id": 2,
+    "method": "Target.createTarget",
+    "params": {
+      "url": "about:blank",
+      "browserContextId": "BROWSER_CTX_1"
+    }
+  }
+  ```
+  Suppose it returns `"targetId": "page-42"`.
+6. Query `GET http://localhost:9222/json` to find the new page’s WebSocket:
+  ```
+  [
+    {
+      "id": "page-42",
+      "type": "page",
+      "webSocketDebuggerUrl": "ws://localhost:9222/devtools/page/XYZ-987"
+    }
+  ]
+  ```
+7. Open a **new** WebSocket connection to `ws://localhost:9222/devtools/page/XYZ-987`, then send:
+  ```json
+  {
+    "id": 1,
+    "method": "Page.navigate",
+    "params": { "url": "https://example.com" }
+  }
+  ```
+
+**Example 2: Flattened Flow**
+
+1. Launch Chrome with remote debugging:
+  ```
+  chrome --remote-debugging-port=9222 --headless
+  ```
+2. Get the browser WebSocket URL as before, then connect to it.
+3. Create a new browser context:
+  ```json
+  {
+    "id": 1,
+    "method": "Target.createBrowserContext"
+  }
+  ```
+  Suppose it returns `"browserContextId": "BROWSER_CTX_2"`.
+4. Create a page within that context:
+  ```json
+  {
+    "id": 2,
+    "method": "Target.createTarget",
+    "params": {
+      "url": "about:blank",
+      "browserContextId": "BROWSER_CTX_2"
+    }
+  }
+  ```
+  Suppose it returns `"targetId": "page-99"`.
+5. Attach with flatten:
+  ```json
+  {
+    "id": 3,
+    "method": "Target.attachToTarget",
+    "params": {
+      "targetId": "page-99",
+      "flatten": true
+    }
+  }
+  ```
+  Suppose it returns `"sessionId": "SESSION_PAGE_99"`.
+6. Navigate the page from **the same browser WebSocket**:
+  ```json
+  {
+    "id": 4,
+    "sessionId": "SESSION_PAGE_99",
+    "method": "Page.navigate",
+    "params": { "url": "https://example.com" }
+  }
+  ```
 
 ---
 
-### **🚀 Key Benefits of Using `flatten: true`**
-✅ **Fewer WebSocket connections** (only one instead of one per page).  
-✅ **No need to fetch a WebSocket URL for each page.**  
-✅ **All commands go through a single connection, simplifying session management.**  
+**Key Takeaways**
+
+• **Browser WebSocket** is ideal for high-level tasks: opening tabs (or contexts), retrieving browser info, or enumerating targets.  
+• **Page WebSocket** is used, in non-flattened mode, to control a specific page’s DOM, console, or network.  
+• **Flattened mode** unifies browser- and page-level commands into a single WebSocket connection. You attach to each target with `"flatten": true`, then include `sessionId` in your messages. This avoids juggling multiple connections.  
+• **Sessions** are the logical channels identified by `sessionId`. They let you direct commands to the correct target, whether you open additional WebSockets (traditional) or stay with one (flattened).
+
+All these commands and endpoints use the same underlying CDP interface. The difference is how you route them: by connecting to multiple endpoints or passing the `sessionId` with flatten mode.

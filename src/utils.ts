@@ -2,7 +2,7 @@
  * Gets the Chromium paths and configuration for the current OS
  * @throws Error if neither CHROMIUM_EXECUTABLE_PATH is set nor both CHROMIUM_DIRECTORY and CHROMIUM_STATIC_VERSION are set
  */
-export function getChromiumPaths(): ChromiumPaths {
+export function getBrowserPaths(): ChromiumPaths {
   const executablePath = Deno.env.get('CHROMIUM_EXECUTABLE_PATH')
   const directory = Deno.env.get('CHROMIUM_DIRECTORY')
   const staticVersion = Deno.env.get('CHROMIUM_STATIC_VERSION')
