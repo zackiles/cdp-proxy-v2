@@ -1,8 +1,39 @@
-export interface CDPProxySessionInfo {
-  clientId: string // Identifies a client connected to this proxy, e.g., "client-123"
-  sessionId: string // Unique CDP session ID, e.g., "session-abc123"
-  targetId: string // CDP target ID, e.g., "target-xyz789"
-  type: 'page' | 'worker' | 'iframe' | 'other' // Type of target, e.g., "page"
+export interface CDPError {
+  type: 'connection' | 'protocol' | 'validation' | 'resource' | 'plugin'
+  code: number
+  message: string
+  details?: unknown
+  recoverable: boolean
+}
+
+export type CDPMessage = CDPRequest | CDPResponse | CDPEvent
+
+export interface CDPRequest {
+  id: number
+  method: string
+  params?: Record<string, unknown>
+  sessionId?: string
+}
+
+export interface CDPResponse {
+  id: number
+  result?: Record<string, unknown>
+  error?: CDPError
+  sessionId?: string
+}
+
+export interface CDPEvent {
+  method: string
+  params?: Record<string, unknown>
+  sessionId?: string
+}
+
+
+export interface CDPSessionInfo {
+  proxySessionId: string
+  sessionId: string
+  targetId: string
+  type: 'page' | 'worker' | 'iframe' | 'other'
 }
 
 export interface CDPProxySessionManager {
@@ -98,4 +129,24 @@ export interface CDPProxySessionManager {
       | 'messageIntercepted',
     listener: (data: any) => void,
   ): void
+}
+
+export interface CDPPlugin {
+  name: string;
+  send?: (
+    sessionId: string,
+    message: CDPRequest,
+  ) => Promise<CDPMessage>;
+  emit?: (
+    sessionId: string,
+    event: CDPEvent,
+  ) => Promise<CDPEvent>;
+  onRequest?: (
+    request: CDPRequest,
+  ) => Promise<CDPRequest | null>;
+  onResponse?: (
+    response: CDPResponse,
+  ) => Promise<CDPResponse | null>;
+  onEvent?: (event: CDPEvent) => Promise<CDPEvent | null>;
+  cleanup?: () => Promise<void>;
 }
