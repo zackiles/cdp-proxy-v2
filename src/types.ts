@@ -1,5 +1,11 @@
 export interface CDPError {
-  type: 'connection' | 'protocol' | 'validation' | 'resource' | 'plugin'
+  type:
+    | 'connection'
+    | 'protocol'
+    | 'validation'
+    | 'resource'
+    | 'plugin'
+    | 'other'
   code: number
   message: string
   details?: unknown
@@ -28,15 +34,19 @@ export interface CDPEvent {
   sessionId?: string
 }
 
-
-export interface CDPSessionInfo {
-  proxySessionId: string
+export interface CDPTargetInfo {
   sessionId: string
   targetId: string
   type: 'page' | 'worker' | 'iframe' | 'other'
 }
 
-export interface CDPProxySessionManager {
+export interface CDPProxySessionInfo {
+  clientId: string
+  sessionId: string
+  type: 'page' | 'worker' | 'iframe' | 'other'
+}
+
+export interface CDPProxySession {
   /** The WebSocket URL of the real browser CDP endpoint
    * example: "ws://localhost:9222/devtools/browser/b0b8a4fb-bb17-4359-9533-a8d9f3908bd8"
    */
@@ -132,21 +142,11 @@ export interface CDPProxySessionManager {
 }
 
 export interface CDPPlugin {
-  name: string;
-  send?: (
-    sessionId: string,
-    message: CDPRequest,
-  ) => Promise<CDPMessage>;
-  emit?: (
-    sessionId: string,
-    event: CDPEvent,
-  ) => Promise<CDPEvent>;
-  onRequest?: (
-    request: CDPRequest,
-  ) => Promise<CDPRequest | null>;
-  onResponse?: (
-    response: CDPResponse,
-  ) => Promise<CDPResponse | null>;
-  onEvent?: (event: CDPEvent) => Promise<CDPEvent | null>;
-  cleanup?: () => Promise<void>;
+  name: string
+  send?: (sessionId: string, message: CDPRequest) => Promise<CDPMessage>
+  emit?: (sessionId: string, event: CDPEvent) => Promise<CDPEvent>
+  onRequest?: (request: CDPRequest) => Promise<CDPRequest | null>
+  onResponse?: (response: CDPResponse) => Promise<CDPResponse | null>
+  onEvent?: (event: CDPEvent) => Promise<CDPEvent | null>
+  cleanup?: () => Promise<void>
 }

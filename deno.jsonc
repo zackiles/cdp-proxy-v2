@@ -19,6 +19,7 @@
     "@std/net": "jsr:@std/net@1",
     "@std/path": "jsr:@std/path@1",
     "@zip-js/zip-js": "jsr:@zip-js/zip-js@^2.7.57",
-    "playwright": "npm:playwright@1"
+    "playwright": "npm:playwright@1",
+    "devtools-protocol": "npm:devtools-protocol@^0.0.1422344"
   }
 }
