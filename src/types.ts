@@ -1,47 +1,24 @@
-export interface CDPError {
-  type: 'connection' | 'protocol' | 'validation' | 'resource' | 'plugin'
-  code: number
-  message: string
-  details?: unknown
-  recoverable: boolean
-}
-
-export type CDPMessage = CDPRequest | CDPResponse | CDPEvent
-
-export interface CDPRequest {
-  id: number
-  method: string
-  params?: Record<string, unknown>
-  sessionId?: string
-}
-
-export interface CDPResponse {
-  id: number
-  result?: Record<string, unknown>
-  error?: CDPError
-  sessionId?: string
-}
-
-export interface CDPEvent {
-  method: string
-  params?: Record<string, unknown>
-  sessionId?: string
-}
-
 
 export interface CDPSessionInfo {
-  proxySessionId: string
   sessionId: string
   targetId: string
   type: 'page' | 'worker' | 'iframe' | 'other'
 }
 
-export interface CDPProxySessionManager {
+export interface ProxyConnection {
+  /** UUID for a proxy connection. Can only be used to represent one client to one browser.
+   *  example: "b0b8a4fb-bb17-4359-9533-a8d9f3908bd8"
+  */
+  connectionId: string
   /** The WebSocket URL of the real browser CDP endpoint
-   * example: "ws://localhost:9222/devtools/browser/b0b8a4fb-bb17-4359-9533-a8d9f3908bd8"
-   */
-  browserWebSocketDebuggerUrl: string
+   *  example: "ws://localhost:9222/devtools/browser/b0b8a4fb-bb17-4359-9533-a8d9f3908bd8"
+  */
+  browserWebSocketDebuggerUrl: string,
+  
+}
 
+export interface CDPProxySessionManager {
+  conn
   /** Active client connections (clientId -> WebSocket)
    * example: { "client-123": WebSocket }
    */
@@ -131,22 +108,51 @@ export interface CDPProxySessionManager {
   ): void
 }
 
+
+export interface CDPError {
+  type: 'connection' | 'protocol' | 'validation' | 'resource' | 'plugin'
+  code: number
+  message: string
+  details?: unknown
+  recoverable: boolean
+}
+
+export interface CDPRequest {
+  id: number
+  method: string
+  params?: Record<string, unknown>
+  sessionId?: string
+}
+
+export interface CDPResponse {
+  id: number
+  result?: Record<string, unknown>
+  error?: CDPError
+  sessionId?: string
+}
+
+export interface CDPEvent {
+  method: string
+  params?: Record<string, unknown>
+  sessionId?: string
+}
+
 export interface CDPPlugin {
   name: string;
-  send?: (
+  sendCommand?: (
     sessionId: string,
     message: CDPRequest,
-  ) => Promise<CDPMessage>;
-  emit?: (
+  ) => Promise<CDPResponse>
+  emitEvent?: (
     sessionId: string,
     event: CDPEvent,
-  ) => Promise<CDPEvent>;
+  ) => Promise<void>
   onRequest?: (
     request: CDPRequest,
-  ) => Promise<CDPRequest | null>;
+  ) => Promise<CDPRequest | null>
   onResponse?: (
-    response: CDPResponse,
-  ) => Promise<CDPResponse | null>;
-  onEvent?: (event: CDPEvent) => Promise<CDPEvent | null>;
+    response: CDPResponse
+  ) => Promise<CDPResponse | null>
+  onEvent?: (event: CDPEvent) => Promise<CDPEvent | null>
   cleanup?: () => Promise<void>;
 }
