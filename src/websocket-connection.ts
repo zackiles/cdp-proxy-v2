@@ -1,5 +1,5 @@
 /**
- * @module websocket-manager
+ * @module websocket-connection
  *
  * A module providing WebSocket proxy functionality for Chrome DevTools Protocol (CDP) messages.
  * Enables intercepting and forwarding CDP messages between a client and browser.
@@ -22,7 +22,7 @@
  * const clientSocket = await acceptClientConnection();
  *
  * // Create manager and connect to browser
- * const manager = new WebSocketManager(
+ * const manager = new WebSocketConnection(
  *   clientSocket,
  *   (message: CDPRequest) => console.log('Client message:', message),
  *   (message: CDPResponse) => console.log('Browser message:', message)
@@ -33,9 +33,19 @@
  * ```
  */
 
-import type { CDPRequest, CDPResponse, CDPEvent, CDPMessage } from './types.ts'
+import type { CDPRequest, CDPResponse, CDPEvent } from './types.ts'
 
-type MessageHandler = (message: CDPMessage) => void | Promise<void>
+type MessageHandler = (message: CDPRequest | CDPResponse | CDPEvent) => void | Promise<void>
+
+/**
+ * Represents a WebSocket endpoint with its associated streams and handlers
+ */
+interface WebSocketEndpoint {
+  socket: WebSocket | undefined
+  stream: WebSocketStream | undefined
+  reader: ReadableStreamDefaultReader<Uint8Array> | undefined
+  writer: WritableStreamDefaultWriter<Uint8Array> | undefined
+}
 
 /**
  * Wraps a WebSocket to provide ReadableStream and WritableStream interfaces.
@@ -83,31 +93,36 @@ enum ConnectionState {
 }
 
 /**
- * Manages bidirectional WebSocket connections for Chrome DevTools Protocol.
- * Handles message forwarding between a client and browser while allowing
- * message inspection and modification.
+ * An instance of a 1:1 WebSocket connection between a client and a browser's root
+ * weDebuggerUrl endpoint. Handles message forwarding between a client and browser while
+ * allowing message inspection and modification. Instances are created and managed by
+ * the ProxyAgent internally.
  */
-export class WebSocketManager {
+export class WebSocketConnection {
   private connectionState = ConnectionState.INITIALIZED
-  private readonly clientSocket: WebSocket
-  private browserSocket?: WebSocket
   private readonly onClientMessage?: MessageHandler
   private readonly onBrowserMessage?: MessageHandler
 
-  private clientStream?: WebSocketStream
-  private browserStream?: WebSocketStream
+  private client: WebSocketEndpoint = {
+    socket: undefined,
+    stream: undefined,
+    reader: undefined,
+    writer: undefined,
+  }
 
-  private clientReader?: ReadableStreamDefaultReader<Uint8Array>
-  private clientWriter?: WritableStreamDefaultWriter<Uint8Array>
-  private browserReader?: ReadableStreamDefaultReader<Uint8Array>
-  private browserWriter?: WritableStreamDefaultWriter<Uint8Array>
+  private browser: WebSocketEndpoint = {
+    socket: undefined,
+    stream: undefined,
+    reader: undefined,
+    writer: undefined,
+  }
 
   constructor(
     clientSocket: WebSocket,
     onClientMessage?: MessageHandler,
     onBrowserMessage?: MessageHandler,
   ) {
-    this.clientSocket = clientSocket
+    this.client.socket = clientSocket
     this.onClientMessage = onClientMessage
     this.onBrowserMessage = onBrowserMessage
   }
@@ -121,7 +136,7 @@ export class WebSocketManager {
       throw new Error('Cannot send message: proxy is not connected')
     }
     const encoded = new TextEncoder().encode(JSON.stringify(message))
-    await this.browserWriter?.write(encoded)
+    await this.browser.writer?.write(encoded)
   }
 
   /**
@@ -133,7 +148,7 @@ export class WebSocketManager {
       throw new Error('Cannot send message: proxy is not connected')
     }
     const encoded = new TextEncoder().encode(JSON.stringify(message))
-    await this.clientWriter?.write(encoded)
+    await this.client.writer?.write(encoded)
   }
 
   /**
@@ -144,23 +159,28 @@ export class WebSocketManager {
     if (this.connectionState === ConnectionState.CLOSED) return
 
     // Release stream readers and writers
-    await this.clientReader?.cancel()
-    await this.browserReader?.cancel()
-    await this.clientWriter?.close()
-    await this.browserWriter?.close()
+    await this.client.reader?.cancel()
+    await this.browser.reader?.cancel()
+    await this.client.writer?.close()
+    await this.browser.writer?.close()
 
     // Close WebSocket connections
-    this.clientSocket.close()
-    this.browserSocket?.close()
+    this.client.socket?.close()
+    this.browser.socket?.close()
 
     // Clear references
-    this.clientReader = undefined
-    this.clientWriter = undefined
-    this.browserReader = undefined
-    this.browserWriter = undefined
-    this.clientStream = undefined
-    this.browserStream = undefined
-    this.browserSocket = undefined
+    this.client = {
+      socket: undefined,
+      stream: undefined,
+      reader: undefined,
+      writer: undefined,
+    }
+    this.browser = {
+      socket: undefined,
+      stream: undefined,
+      reader: undefined,
+      writer: undefined,
+    }
 
     this.connectionState = ConnectionState.CLOSED
   }
@@ -188,28 +208,28 @@ export class WebSocketManager {
     this.connectionState = ConnectionState.CONNECTING
 
     try {
-      this.browserSocket = await this.connectToBrowser(
+      this.browser.socket = await this.connectToBrowser(
         browserWebSocketDebuggerUrl,
       )
 
-      this.clientStream = new WebSocketStream(this.clientSocket)
-      this.browserStream = new WebSocketStream(this.browserSocket)
+      this.client.stream = new WebSocketStream(this.client.socket!)
+      this.browser.stream = new WebSocketStream(this.browser.socket)
 
-      this.clientReader = this.clientStream.readable.getReader()
-      this.clientWriter = this.clientStream.writable.getWriter()
-      this.browserReader = this.browserStream.readable.getReader()
-      this.browserWriter = this.browserStream.writable.getWriter()
+      this.client.reader = this.client.stream.readable.getReader()
+      this.client.writer = this.client.stream.writable.getWriter()
+      this.browser.reader = this.browser.stream.readable.getReader()
+      this.browser.writer = this.browser.stream.writable.getWriter()
 
       // Start message piping with Promise.all to handle errors
       const pipePromises = [
         this.pipeMessages(
-          this.clientReader,
-          this.browserWriter,
+          this.client.reader,
+          this.browser.writer,
           'clientToBrowser',
         ),
         this.pipeMessages(
-          this.browserReader,
-          this.clientWriter,
+          this.browser.reader,
+          this.client.writer,
           'browserToClient',
         ),
       ]
@@ -239,63 +259,94 @@ export class WebSocketManager {
     browserWebSocketDebuggerUrl: string,
   ): Promise<WebSocket> {
     const socket = new WebSocket(browserWebSocketDebuggerUrl)
+    const abortController = new AbortController()
+    
+    // Set up timeout
+    const timeoutId = setTimeout(() => {
+      abortController.abort()
+      socket.close()
+    }, 5000)
 
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        socket.close()
-        reject(new Error('Connection timeout'))
-      }, 5000)
+    try {
+      await new Promise<void>((resolve, reject) => {
+        // Use AbortController signal to handle timeout
+        abortController.signal.addEventListener('abort', () => {
+          reject(new Error('Connection timeout'))
+        })
 
-      socket.onopen = () => {
-        clearTimeout(timeout)
-        resolve(socket)
-      }
+        socket.onopen = () => resolve()
+        socket.onclose = () => reject(new Error('Connection closed before established'))
+        socket.onerror = error => reject(error)
+      })
 
-      socket.onclose = () => {
-        clearTimeout(timeout)
-        reject(new Error('Connection closed before established'))
-      }
-
-      socket.onerror = (error) => {
-        clearTimeout(timeout)
-        reject(error)
-      }
-    })
+      return socket
+    } finally {
+      clearTimeout(timeoutId)
+    }
   }
 
   /**
    * Pipes messages between a reader and writer stream, handling message parsing
    * and forwarding. Automatically cleans up the active session on completion.
+   * @throws {Error} If message handling fails in an unrecoverable way
    */
   private async pipeMessages(
     reader: ReadableStreamDefaultReader<Uint8Array>,
     writer: WritableStreamDefaultWriter<Uint8Array>,
     direction: 'clientToBrowser' | 'browserToClient',
-  ) {
-    while (true) {
-      const { value, done } = await reader.read()
-      if (done) {
-        this.connectionState = ConnectionState.CLOSED
-        break
-      }
+  ): Promise<void> {
+    const decoder = new TextDecoder()
+    const messageHandler = direction === 'clientToBrowser' 
+      ? this.onClientMessage 
+      : this.onBrowserMessage
 
-      const messageText = new TextDecoder().decode(value)
-      let parsed: CDPMessage
-      try {
-        parsed = JSON.parse(messageText)
-
-        // Call appropriate message handler
-        if (direction === 'clientToBrowser') {
-          await this.onClientMessage?.(parsed)
-        } else {
-          await this.onBrowserMessage?.(parsed)
+    try {
+      while (true) {
+        const { value, done } = await reader.read()
+        
+        if (done) {
+          this.connectionState = ConnectionState.CLOSED
+          break
         }
-      } catch {
-        continue
-      }
 
-      await writer.write(value)
+        // Process message if we have a value
+        if (value) {
+          const messageText = decoder.decode(value)
+          
+          // Handle the message and continue even if parsing fails
+          await this.handleMessage(messageText, messageHandler)
+            .catch(error => console.error('Message handling error:', error))
+
+          // Always forward the raw message regardless of parsing success
+          await writer.write(value)
+        }
+      }
+    } catch (error) {
+      console.error('Fatal error in message pipe:', error)
+      throw error
+    } finally {
+      await writer.close().catch(() => {}) // Ignore close errors
     }
-    writer.close()
+  }
+
+  /**
+   * Handles parsing and processing of a single message
+   * @param messageText - The raw message text to parse
+   * @param handler - The message handler to call if parsing succeeds
+   */
+  private async handleMessage(
+    messageText: string,
+    handler?: MessageHandler
+  ): Promise<void> {
+    try {
+      const parsed = JSON.parse(messageText) as CDPRequest | CDPResponse | CDPEvent
+      await handler?.(parsed)
+    } catch (error) {
+      if (error instanceof SyntaxError) {
+        console.warn('Failed to parse message:', error)
+      } else {
+        throw error // Rethrow non-parsing errors
+      }
+    }
   }
 }

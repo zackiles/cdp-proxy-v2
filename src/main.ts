@@ -13,11 +13,68 @@ await chromium.install({
 
 console.log('installed')
 */
+const ac = new AbortController()
+//import { ProxyAgent } from './proxy-agent.ts'
+import { ProxyRewriter } from './proxy-rewriter.ts'
 
-import { ProxyManager } from './proxy-manager.ts'
+const config = {
+  port: 9994,
+  hostname: "127.0.0.1",
+}
+const proxyRewriter = new ProxyRewriter(config.port, config.hostname)
 
-const proxy = new ProxyManager()
+
+const httpHandler = (req: Request): Promise<Response | null> => {
+  console.log(Deno.inspect(req))
+  return Promise.resolve(new Response('Hello, world'))
+}
+
+const server = Deno.serve({
+  port: config.port,
+  hostname: config.hostname,
+  handler: proxyRewriter.handler([httpHandler]),
+  signal: ac.signal,
+  onListen({ port, hostname }) {
+    console.log(`Server started at http://${hostname}:${port}`)
+  },
+})
+
+// Add signal handlers for graceful shutdown
+const handleShutdown = async () => {
+  console.log("Closing server...")
+  ac.abort()
+  await server.shutdown()
+};
+
+// Add signal handlers for graceful shutdown
+Deno.addSignalListener("SIGINT", handleShutdown);
+Deno.addSignalListener("SIGTERM", handleShutdown);
+
+// Handle uncaught exceptions
+addEventListener("unhandledrejection", (event: PromiseRejectionEvent) => {
+  console.error("Unhandled rejection:", event.reason);
+  handleShutdown();
+});
+
+addEventListener("error", (event: ErrorEvent) => {
+  console.error("Uncaught exception:", event.error);
+  handleShutdown();
+});
+
+server.finished.then(() => {
+  console.log("Server closed")
+  Deno.exit(0)
+})
+
+
+/**
+const proxy = new ProxyAgent()
+
+const clientWebSocket = new WebSocket('ws://localhost:9222/devtools/client');
+const browserWebSocket = new WebSocket('ws://localhost:9222/devtools/browser');
 
 proxy.createConnection(
-  'ws://localhost:9222/devtools/browser/b0b8a4fb-bb17-4359-9533-a8d9f3908bd8',
+clientWebSocket,
+'ws://localhost:9222/devtools/browser'
 )
+ */

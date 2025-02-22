@@ -1,6 +1,5 @@
-import { WebSocketStream } from ''
+import { WebSocketConnection } from './websocket-connection.ts'
 import type {
-  ProxyManager as IProxyManager,
   ProxyConnection,
   CDPTarget,
   ConnectionId,
@@ -9,16 +8,17 @@ import type {
   CDPRequest,
   CDPResponse,
 } from './types.ts'
+
 type TargetSearchParams =
   | { sessionId: SessionId; targetId?: never; connectionId?: ConnectionId }
   | { sessionId?: never; targetId: TargetId; connectionId?: ConnectionId }
 
-export class ProxyManager implements IProxyManager {
+export class ProxyAgent {
   connections: Map<ConnectionId, ProxyConnection> = new Map()
 
   constructor() {}
 
-  async getTarget(params: TargetSearchParams): Promise<CDPTarget | undefined> {
+  getTarget(params: TargetSearchParams): CDPTarget | undefined {
     const connection = params.connectionId
       ? this.connections.get(params.connectionId)
       : Array.from(this.connections.values())[0]
@@ -80,8 +80,9 @@ export class ProxyManager implements IProxyManager {
     // Exact implementation depends on WebSocketStream interface
   }
 
-  async createConnection(browserWebSocketDebuggerUrl: string): Promise<void> {
-    // Implementation would:
+  async createConnection(clientSocket: WebSocket, browserWebSocketDebuggerUrl: string): Promise<void> {
+    const connection = new WebSocketConnection(clientSocket)
+    await connection.connect(browserWebSocketDebuggerUrl, firstMessage)
     // 1. Create a new connection ID
     // 2. Establish WebSocket connections
     // 3. Create ProxyConnection object

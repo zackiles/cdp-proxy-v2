@@ -36,36 +36,6 @@ export interface ProxyConnection {
   targets: Map<TargetId, CDPTarget>
 }
 
-export interface ProxyManager {
-  connections: Map<ConnectionId, ProxyConnection>
-  getTarget(params: TargetSearchParams): Promise<CDPTarget | undefined>
-
-  interceptClientMessage(
-    connectionId: ConnectionId,
-    message: CDPRequest,
-  ): Promise<CDPRequest>
-
-  interceptBrowserMessage(
-    connectionId: ConnectionId,
-    message: CDPResponse,
-  ): Promise<CDPResponse>
-
-  forwardToBrowser(
-    connectionId: ConnectionId,
-    message: CDPRequest,
-  ): Promise<void>
-  forwardToClient(
-    connectionId: ConnectionId,
-    message: CDPResponse,
-  ): Promise<void>
-
-  createConnection(browserWebSocketDebuggerUrl: string): Promise<void>
-
-  closeConnection(connectionId: ConnectionId): Promise<void>
-
-  close(): Promise<void>
-}
-
 type CDPMessage = CDPRequest | CDPResponse | CDPEvent
 
 export interface CDPError {
