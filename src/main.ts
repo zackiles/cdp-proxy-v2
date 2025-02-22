@@ -44,8 +44,8 @@ const server = Deno.serve({
 })
 
 const browserManager = new BrowserManager(config.hostname, config.browserPort, config.browserExecutablePath)
-const wsUrl = await browserManager.start()
-console.log(`Browser debugger url started at ${wsUrl}`)
+const { browser, browserWebSocketDebuggerUrl } = await browserManager.start()
+console.log(`Browser debugger url started at ${browserWebSocketDebuggerUrl}`)
 
 // Add signal handlers for graceful shutdown
 const handleShutdown = async () => {

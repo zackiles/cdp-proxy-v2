@@ -2,6 +2,11 @@ import { launch, type LaunchedChrome } from 'chrome-launcher'
 
 import { BROWSER_LAUNCH_FLAGS } from './constants.ts'
 
+type BrowserStartResult = {
+  browser: LaunchedChrome,
+  browserWebSocketDebuggerUrl: string | null
+}
+
 export class BrowserManager {
   private hostname: string
   private port: number
@@ -16,7 +21,7 @@ export class BrowserManager {
   }
 
 
-  async start(): Promise<LaunchedChrome> {
+  async start(): Promise<BrowserStartResult> {
     this.browser = await launch({
       chromePath: this.browserExecutablePath,
       port: this.port,
@@ -31,7 +36,7 @@ export class BrowserManager {
     if(!this.browserWebSocketDebuggerUrl) {
       throw new Error(`Failed to start Browser on ${this.hostname + this.port}!`)
     }
-    return this.browser
+    return { browser: this.browser, browserWebSocketDebuggerUrl: this.browserWebSocketDebuggerUrl }
   }
 
   async #getCDPWebSocketUrl(): Promise<string | null> {
