@@ -13,7 +13,7 @@ type TargetSearchParams =
   | { sessionId: SessionId; targetId?: never; connectionId?: ConnectionId }
   | { sessionId?: never; targetId: TargetId; connectionId?: ConnectionId }
 
-export class ProxyAgent {
+class ProxyAgent {
   connections: Map<ConnectionId, ProxyConnection> = new Map()
 
   constructor() {}
@@ -105,3 +105,5 @@ export class ProxyAgent {
     }
   }
 }
+
+export { ProxyAgent }

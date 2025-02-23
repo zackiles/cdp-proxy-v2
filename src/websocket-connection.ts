@@ -98,7 +98,7 @@ enum ConnectionState {
  * allowing message inspection and modification. Instances are created and managed by
  * the ProxyAgent internally.
  */
-export class WebSocketConnection {
+class WebSocketConnection {
   private connectionState = ConnectionState.INITIALIZED
   private readonly onClientMessage?: MessageHandler
   private readonly onBrowserMessage?: MessageHandler
@@ -350,3 +350,5 @@ export class WebSocketConnection {
     }
   }
 }
+
+export { WebSocketConnection }

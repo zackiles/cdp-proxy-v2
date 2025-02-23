@@ -1,5 +1,4 @@
 import { launch, type LaunchedChrome } from 'chrome-launcher'
-
 import { BROWSER_LAUNCH_FLAGS } from './constants.ts'
 
 type BrowserStartResult = {
@@ -8,15 +7,16 @@ type BrowserStartResult = {
 }
 
 export class BrowserManager {
-  private hostname: string
-  private port: number
-  private browserExecutablePath: string
   private browser!: LaunchedChrome
-  private browserWebSocketDebuggerUrl!: string | null
+  private browserHost: string
+  private browserPort: number
+  private browserExecutablePath: string
 
-  constructor(host: string, port: number, browserExecutablePath: string) {
-    this.hostname = host
-    this.port = port
+  private browserWebSocketDebuggerUrl!: string
+
+  constructor(browserHost: string, browserPort: number, browserExecutablePath: string) {
+    this.browserHost = browserHost
+    this.browserPort = browserPort
     this.browserExecutablePath = browserExecutablePath
   }
 
@@ -24,25 +24,25 @@ export class BrowserManager {
   async start(): Promise<BrowserStartResult> {
     this.browser = await launch({
       chromePath: this.browserExecutablePath,
-      port: this.port,
+      port: this.browserPort,
       chromeFlags: [
         ...BROWSER_LAUNCH_FLAGS, 
-        `--remote-debugging-port=${this.port}`,
-        `--remote-debugging-address=${this.hostname}`
+        `--remote-debugging-port=${this.browserPort}`,
+        `--remote-debugging-address=${this.browserHost}`
       ],
       handleSIGINT: true,
     })
     this.browserWebSocketDebuggerUrl = await this.#getCDPWebSocketUrl()
     if(!this.browserWebSocketDebuggerUrl) {
-      throw new Error(`Failed to start Browser on ${this.hostname + this.port}!`)
+      throw new Error(`Failed to start Browser on ${this.browserHost + this.browserPort}!`)
     }
     return { browser: this.browser, browserWebSocketDebuggerUrl: this.browserWebSocketDebuggerUrl }
   }
 
   async #getCDPWebSocketUrl(): Promise<string | null> {
     try {
-      console.debug(`Checking for an active CDP connection at http://${this.hostname}:${this.port}/json/version`)
-      const response = await fetch(`http://${this.hostname}:${this.port}/json/version`)
+      console.debug(`Checking for an active CDP connection at http://${this.browserHost}:${this.browserPort}/json/version`)
+      const response = await fetch(`http://${this.browserHost}:${this.browserPort}/json/version`)
   
       if (!response.ok) {
         console.debug(`Received HTTP ${response.status} from CDP endpoint`)

@@ -1,9 +1,9 @@
-export type TargetId = string
-export type SessionId = string
+type TargetId = string
+type SessionId = string
 
-export type ConnectionId = string
+type ConnectionId = string
 
-export interface CDPTarget {
+interface CDPTarget {
   sessionId: SessionId
   targetId: TargetId
   type:
@@ -21,7 +21,7 @@ export interface CDPTarget {
     | 'assistive_technology'
 }
 
-export interface ProxyConnection {
+interface ProxyConnection {
   /** UUID for a proxy connection. Can only be used to represent one client to one browser.
    *  example: "b0b8a4fb-bb17-4359-9533-a8d9f3908bd8"
    */
@@ -38,7 +38,7 @@ export interface ProxyConnection {
 
 type CDPMessage = CDPRequest | CDPResponse | CDPEvent
 
-export interface CDPError {
+interface CDPError {
   type: 'connection' | 'protocol' | 'validation' | 'resource' | 'plugin'
   code: number
   message: string
@@ -46,27 +46,27 @@ export interface CDPError {
   recoverable: boolean
 }
 
-export interface CDPRequest {
+interface CDPRequest {
   id: number
   method: string
   params?: Record<string, unknown>
   sessionId?: string
 }
 
-export interface CDPResponse {
+interface CDPResponse {
   id: number
   result?: Record<string, unknown>
   error?: CDPError
   sessionId?: string
 }
 
-export interface CDPEvent {
+interface CDPEvent {
   method: string
   params?: Record<string, unknown>
   sessionId?: string
 }
 
-export interface CDPPlugin {
+interface CDPPlugin {
   name: string
   sendCommand?: (sessionId: string, message: CDPRequest) => Promise<CDPResponse>
   emitEvent?: (sessionId: string, event: CDPEvent) => Promise<void>
@@ -74,4 +74,18 @@ export interface CDPPlugin {
   onResponse?: (response: CDPResponse) => Promise<CDPResponse | null>
   onEvent?: (event: CDPEvent) => Promise<CDPEvent | null>
   cleanup?: () => Promise<void>
+}
+
+export type {
+  TargetId,
+  SessionId,
+  ConnectionId,
+  CDPTarget,
+  ProxyConnection,
+  CDPMessage,
+  CDPError,
+  CDPRequest,
+  CDPResponse,
+  CDPEvent,
+  CDPPlugin
 }

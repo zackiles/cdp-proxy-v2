@@ -21,16 +21,24 @@ import { httpHandler } from './http-handler.ts'
 
 const config = {
   proxyPort: Number(Deno.env.get('CDP_PROXY_PORT')) || getAvailablePort(),
-  browserPort: Number(Deno.env.get('BROWSER_PORT')) || getAvailablePort(),
-  hostname: Deno.env.get('CDP_PROXY_HOSTNAME') || '0.0.0.0',
-  browserExecutablePath: Deno.env.get('BROWSER_EXECUTABLE_PATH'),
+  proxyHost: Deno.env.get('CDP_PROXY_HOST') || 'localhost',
+  browserPort: Number(Deno.env.get('CDP_BROWSER_PORT')) || getAvailablePort(),
+  browserHost: Deno.env.get('CDP_BROWSER_HOST') || 'localhost',
+  browserExecutablePath: Deno.env.get('CDP_BROWSER_EXECUTABLE_PATH') || '',
 }
 
+const browserManager = new BrowserManager(
+  config.browserHost,
+  config.browserPort,
+  config.browserExecutablePath,
+)
+const { browser, browserWebSocketDebuggerUrl } = await browserManager.start()
+console.log(`Browser debugger url started at ${browserWebSocketDebuggerUrl}`)
 
 
 const server = Deno.serve({
   port: config.proxyPort,
-  hostname: config.hostname,
+  hostname: config.proxyHost,
   handler: httpHandler,
   signal: ac.signal,
   onListen({ port, hostname }) {
@@ -38,13 +46,6 @@ const server = Deno.serve({
   },
 })
 
-const browserManager = new BrowserManager(
-  config.hostname,
-  config.browserPort,
-  config.browserExecutablePath || '',
-)
-const { browser, browserWebSocketDebuggerUrl } = await browserManager.start()
-console.log(`Browser debugger url started at ${browserWebSocketDebuggerUrl}`)
 
 // Add signal handlers for graceful shutdown
 const handleShutdown = async () => {

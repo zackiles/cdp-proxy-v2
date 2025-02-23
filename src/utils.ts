@@ -1,4 +1,4 @@
-export const killProcessByPort = async (port: number): Promise<void> => {
+async function killProcessByPort(port: number): Promise<void> {
   if (!port) return Promise.resolve();
   try {
     if (Deno.build.os === 'windows') {
@@ -33,3 +33,5 @@ export const killProcessByPort = async (port: number): Promise<void> => {
     }
   }
 }
+
+export { killProcessByPort }
