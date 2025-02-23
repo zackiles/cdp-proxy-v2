@@ -1,37 +1,23 @@
-async function killProcessByPort(port: number): Promise<void> {
-  if (!port) return Promise.resolve();
-  try {
-    if (Deno.build.os === 'windows') {
-      const netstatCmd = await new Deno.Command('netstat', { args: ['-ano'] }).output();
-      const pid = new TextDecoder()
-        .decode(netstatCmd.stdout)
-        .split('\n')
-        .find(line => line.includes(`:${port}`))
-        ?.trim()
-        .split(/\s+/)
-        .pop();
+/**
+ * Monitors a process ID and resolves when either the process exits or timeout is reached
+ * @param {number} pid - Process ID to monitor
+ * @param {number} timeout - Maximum wait time in milliseconds
+ * @returns {Promise<void>} Resolves when process exits or timeout occurs
+ * @example
+ * await waitForProcessExit(12345, 5000);
+ */
+async function waitForProcessExit(pid: number, timeout: number): Promise<void> {
+  const POLL_INTERVAL = 100;
+  const startTime = Date.now()
 
-      if (pid) {
-        await new Deno.Command('taskkill', { args: ['/F', '/PID', pid] })
-          .output()
-          .catch(e => console.debug(`Failed to kill PID ${pid}:`, e));
-      }
-
-      await new Deno.Command('taskkill', { args: ['/F', '/IM', 'chrome.exe'] })
-        .output()
-        .catch(e => !(e instanceof Deno.errors.NotFound) && console.warn('Error killing browser:', e));
-    } else {
-      await new Deno.Command('pkill', {
-        args: ['-f', `(chrome|chromium).*--remote-debugging-port=${port}`],
-      })
-        .output()
-        .catch(e => !(e instanceof Deno.errors.NotFound) && console.warn('Error killing browser:', e));
-    }
-  } catch (error) {
-    if (!(error instanceof Deno.errors.NotFound)) {
-      console.warn('Error killing browser process:', error);
+  while (Date.now() - startTime < timeout) {
+    try {
+      Deno.kill(pid, undefined)
+      await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL))
+    } catch {
+      return
     }
   }
 }
 
-export { killProcessByPort }
+export { waitForProcessExit }

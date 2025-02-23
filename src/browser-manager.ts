@@ -1,18 +1,13 @@
 import { launch, type LaunchedChrome } from 'chrome-launcher'
 import { BROWSER_LAUNCH_FLAGS } from './constants.ts'
+import { waitForProcessExit } from './utils.ts'
 
-type BrowserStartResult = {
-  browser: LaunchedChrome,
-  browserWebSocketDebuggerUrl: string | null
-}
-
-export class BrowserManager {
-  private browser!: LaunchedChrome
-  private browserHost: string
-  private browserPort: number
-  private browserExecutablePath: string
-
-  private browserWebSocketDebuggerUrl!: string
+class BrowserManager {
+  #browser: LaunchedChrome | null = null
+  browserHost: string
+  browserPort: number
+  browserExecutablePath: string
+  browserWebSocketDebuggerUrl!: string
 
   constructor(browserHost: string, browserPort: number, browserExecutablePath: string) {
     this.browserHost = browserHost
@@ -21,8 +16,8 @@ export class BrowserManager {
   }
 
 
-  async start(): Promise<BrowserStartResult> {
-    this.browser = await launch({
+  async start(): Promise<void> {
+    this.#browser = await launch({
       chromePath: this.browserExecutablePath,
       port: this.browserPort,
       chromeFlags: [
@@ -36,17 +31,24 @@ export class BrowserManager {
     if(!this.browserWebSocketDebuggerUrl) {
       throw new Error(`Failed to start Browser on ${this.browserHost + this.browserPort}!`)
     }
-    return { browser: this.browser, browserWebSocketDebuggerUrl: this.browserWebSocketDebuggerUrl }
   }
 
-  async #getCDPWebSocketUrl(): Promise<string | null> {
+  async close(timeout: number = 5000): Promise<void> {
+    if(!this.#browser || !this.#browser.pid) {
+      throw new Error('Failed to close Browser, no browser running!')
+    }
+    this.#browser?.kill()
+    return await waitForProcessExit(this.#browser.pid, timeout)
+  }
+
+  async #getCDPWebSocketUrl(): Promise<string> {
     try {
       console.debug(`Checking for an active CDP connection at http://${this.browserHost}:${this.browserPort}/json/version`)
       const response = await fetch(`http://${this.browserHost}:${this.browserPort}/json/version`)
   
       if (!response.ok) {
         console.debug(`Received HTTP ${response.status} from CDP endpoint`)
-        return null
+        return ''
       }
   
       const data = await response.json()
@@ -56,10 +58,12 @@ export class BrowserManager {
       }
   
       console.warn('Unexpected response format from CDP endpoint:', data)
-      return null
+      return ''
     } catch (error) {
       console.debug(`Error while attempting to reach CDP endpoint: ${(error as Error).message}`)
-      return null
+      return ''
     }
   }
 }
+
+export { BrowserManager }

@@ -27,5 +27,11 @@
     "chrome-launcher": "npm:chrome-launcher@1",
     "playwright": "npm:playwright@1",
     "devtools-protocol": "npm:devtools-protocol@^0.0.1422344"
+  },
+  "fmt": {
+    "include": ["*.ts"],
+    "lineWidth": 80,
+    "semiColons": false,
+    "singleQuote": true
   }
 }

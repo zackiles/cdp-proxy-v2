@@ -13,11 +13,13 @@ await chromium.install({
 
 console.log('installed')
 */
+import '@std/dotenv/load'
 import { getAvailablePort } from '@std/net'
 const ac = new AbortController()
 //import { ProxyAgent } from './proxy-agent.ts'
 import { BrowserManager } from './browser-manager.ts'
-import { httpHandler } from './http-handler.ts'
+import { HttpHandler } from './http-handler.ts'
+
 
 const config = {
   proxyPort: Number(Deno.env.get('CDP_PROXY_PORT')) || getAvailablePort(),
@@ -32,14 +34,17 @@ const browserManager = new BrowserManager(
   config.browserPort,
   config.browserExecutablePath,
 )
-const { browser, browserWebSocketDebuggerUrl } = await browserManager.start()
-console.log(`Browser debugger url started at ${browserWebSocketDebuggerUrl}`)
+
+const httpHandler = new HttpHandler(config.browserHost, config.browserPort)
+
+await browserManager.start()
+console.log(`Browser debugger url started at ${browserManager.browserWebSocketDebuggerUrl}`)
 
 
 const server = Deno.serve({
   port: config.proxyPort,
   hostname: config.proxyHost,
-  handler: httpHandler,
+  handler: httpHandler.handle,
   signal: ac.signal,
   onListen({ port, hostname }) {
     console.log(`Server started at http://${hostname}:${port!}`)
@@ -53,6 +58,7 @@ const handleShutdown = async () => {
     `Closing server at http://${config.hostname}:${config.proxyPort}...`,
   )
   ac.abort()
+  await browserManager.close()
   await server.shutdown()
 }
 
