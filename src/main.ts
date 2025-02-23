@@ -16,8 +16,8 @@ console.log('installed')
 import { getAvailablePort } from '@std/net'
 const ac = new AbortController()
 //import { ProxyAgent } from './proxy-agent.ts'
-import { replaceInResponse } from '@zackiles/response-rewriter'
 import { BrowserManager } from './browser-manager.ts'
+import { httpHandler } from './http-handler.ts'
 
 const config = {
   proxyPort: Number(Deno.env.get('CDP_PROXY_PORT')) || getAvailablePort(),
@@ -26,10 +26,7 @@ const config = {
   browserExecutablePath: Deno.env.get('BROWSER_EXECUTABLE_PATH'),
 }
 
-const httpHandler = (req: Request): Promise<Response> => {
-  console.log(Deno.inspect(req))
-  return Promise.resolve(new Response('Hello, world'))
-}
+
 
 const server = Deno.serve({
   port: config.proxyPort,
@@ -44,7 +41,7 @@ const server = Deno.serve({
 const browserManager = new BrowserManager(
   config.hostname,
   config.browserPort,
-  config.browserExecutablePath,
+  config.browserExecutablePath || '',
 )
 const { browser, browserWebSocketDebuggerUrl } = await browserManager.start()
 console.log(`Browser debugger url started at ${browserWebSocketDebuggerUrl}`)
