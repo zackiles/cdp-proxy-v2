@@ -30,6 +30,12 @@ globs: *.ts, *.js
   - **Logical assignment operators**  
   - **WeakRefs**, **BigInt**, **Crypto**, **SharedArrayBuffer**  
   - **TextEncoder**, **TextDecoder**, **WebSocketStream**, etc.
+- **Semicolon Usage**
+  - **Always** follow the existing codebase's semicolon style
+  - If the codebase uses semicolons, include them consistently
+  - If the codebase omits semicolons, ensure they are not added
+  - When in doubt, verify the style in multiple files before making assumptions
+  - For new codebases, default to **no semicolons** unless specified otherwise
 
 ### Functional & Compositional Approach
 - Within functions, prefer **functional** over imperative control flows.  
@@ -90,6 +96,12 @@ this.on('some action', eventHandler)
 
 ### Imports
 - Understand what is being imported to leverage the latest ESM features (e.g., `import type`, import maps, import attributes).
+- Imports should be cordered according to the rules about imports in "### Code Ordering".
+
+### Exports
+- Exports should always be declared at the bottom of code files and never in the middle.
+- Exports delcarations should be as free of logic as possible.
+- Prefer simple object exports such as `export {someMethod, anotherMethod}`.
 
 ### Error Handling Strategy
 - Discourage deeply nested try/catch blocks; prefer flat promise chains and modular error handling.

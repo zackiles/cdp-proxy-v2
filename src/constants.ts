@@ -99,4 +99,27 @@ const PROXY_TO_CDP_LOG_LEVEL = {
   verbose: '--v=3'   // Most detailed logging (includes errors)
 }
 
-export { CDP_HTTP_PATHS, CDP_WEBSOCKET_PATHS, BROWSER_LAUNCH_FLAGS, PROXY_TO_CDP_LOG_LEVEL }
+/**
+ * Maps proxy's log levels to chrome-launcher's expected log levels.
+ * This mapping ensures compatibility between our more granular logging system
+ * and chrome-launcher's simpler logging interface.
+ * @constant
+ * @type {Record<string, "silent" | "error" | "warn" | "info" | "verbose">}
+ */
+const PROXY_TO_LAUNCHER_LOG_LEVEL = {
+  silent: "silent",   // No logs
+  error: "error",     // Errors only
+  warn: "warn",       // Warnings and errors
+  info: "info",       // Normal operational logs
+  debug: "verbose",   // Maps to verbose for detailed output
+  log: "info",        // Maps to info for standard logging
+  verbose: "verbose"  // Most detailed logging
+} as const
+
+export { 
+  CDP_HTTP_PATHS, 
+  CDP_WEBSOCKET_PATHS, 
+  BROWSER_LAUNCH_FLAGS, 
+  PROXY_TO_CDP_LOG_LEVEL,
+  PROXY_TO_LAUNCHER_LOG_LEVEL 
+}

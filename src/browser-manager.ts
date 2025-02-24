@@ -3,8 +3,9 @@
  * Handles browser lifecycle including launch, connection, and graceful shutdown.
  */
 import { launch, Launcher, type LaunchedChrome } from 'chrome-launcher'
-import { BROWSER_LAUNCH_FLAGS, PROXY_TO_CDP_LOG_LEVEL } from './constants.ts'
+import { BROWSER_LAUNCH_FLAGS } from './constants.ts'
 import { waitForProcessExit, killProcessOnPortByName } from './utils.ts'
+import { Config } from './config.ts'
 
 interface LaunchedBrowser extends LaunchedChrome {
   browserWebSocketDebuggerUrl?: string
@@ -34,8 +35,6 @@ class BrowserManager {
    * @throws {Error} If browser fails to launch or CDP connection fails
    */
   async start(): Promise<void> {
-    const logLevel = (Deno.env.get('CDP_LOG_LEVEL') as "silent" | "error" | "warn" | "info" | "verbose" | undefined) || 'verbose'
-
     console.debug(`Ensuring a browser is not already running on port ${this.browserPort}...`)
 
     await killProcessOnPortByName(this.browserPort, /brave|chrome|edge/i)
@@ -52,15 +51,15 @@ class BrowserManager {
         chromePath: this.browserExecutablePath,
         port: Number(this.browserPort),
         userDataDir: false,
-        logLevel: logLevel,
+        logLevel: Config.get('launcherLogLevel'),
         maxConnectionRetries: 2,
         connectionPollInterval: 500,
         startingUrl: undefined, 
         chromeFlags: [
-          ...BROWSER_LAUNCH_FLAGS, 
+          ...BROWSER_LAUNCH_FLAGS,
+          Config.get('cdpLogLevelFlag'),
           `--remote-debugging-port=${this.browserPort}`,
           `--remote-debugging-address=${this.browserHost}`,
-          `--v=${PROXY_TO_CDP_LOG_LEVEL[logLevel]}`,
           '--disable-gcm',
           '--disable-sync',
           '--disable-background-networking',

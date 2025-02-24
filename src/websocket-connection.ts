@@ -35,7 +35,7 @@
 
 import type { CDPRequest, CDPResponse, CDPEvent } from './types.ts'
 
-type MessageHandler = (message: CDPRequest | CDPResponse | CDPEvent) => void | Promise<void>
+type WebSocketMessageHandler = (message: CDPRequest | CDPResponse | CDPEvent) => void | Promise<void>
 
 /**
  * Represents a WebSocket endpoint with its associated streams and handlers
@@ -51,7 +51,7 @@ interface WebSocketEndpoint {
  * Wraps a WebSocket to provide ReadableStream and WritableStream interfaces.
  * Handles binary data conversion and error propagation.
  */
-class WebSocketStream {
+export class WebSocketStream {
   readonly readable: ReadableStream<Uint8Array>
   readonly writable: WritableStream<Uint8Array>
 
@@ -85,7 +85,7 @@ class WebSocketStream {
 /**
  * Connection states for the WebSocket manager
  */
-enum ConnectionState {
+enum WebSocketConnectionState {
   INITIALIZED = 'initialized',
   CONNECTING = 'connecting',
   CONNECTED = 'connected',
@@ -99,9 +99,9 @@ enum ConnectionState {
  * the ProxyAgent internally.
  */
 class WebSocketConnection {
-  private connectionState = ConnectionState.INITIALIZED
-  private readonly onClientMessage?: MessageHandler
-  private readonly onBrowserMessage?: MessageHandler
+  private connectionState = WebSocketConnectionState.INITIALIZED
+  private readonly onClientMessage?: WebSocketMessageHandler
+  private readonly onBrowserMessage?: WebSocketMessageHandler
 
   private client: WebSocketEndpoint = {
     socket: undefined,
@@ -119,8 +119,8 @@ class WebSocketConnection {
 
   constructor(
     clientSocket: WebSocket,
-    onClientMessage?: MessageHandler,
-    onBrowserMessage?: MessageHandler,
+    onClientMessage?: WebSocketMessageHandler,
+    onBrowserMessage?: WebSocketMessageHandler,
   ) {
     this.client.socket = clientSocket
     this.onClientMessage = onClientMessage
@@ -132,7 +132,7 @@ class WebSocketConnection {
    * @throws {Error} If the proxy is not connected
    */
   public async sendToBrowser(message: CDPRequest) {
-    if (this.connectionState !== ConnectionState.CONNECTED) {
+    if (this.connectionState !== WebSocketConnectionState.CONNECTED) {
       throw new Error('Cannot send message: proxy is not connected')
     }
     const encoded = new TextEncoder().encode(JSON.stringify(message))
@@ -144,7 +144,7 @@ class WebSocketConnection {
    * @throws {Error} If the proxy is not connected
    */
   public async sendToClient(message: CDPResponse | CDPEvent) {
-    if (this.connectionState !== ConnectionState.CONNECTED) {
+    if (this.connectionState !== WebSocketConnectionState.CONNECTED) {
       throw new Error('Cannot send message: proxy is not connected')
     }
     const encoded = new TextEncoder().encode(JSON.stringify(message))
@@ -156,7 +156,7 @@ class WebSocketConnection {
    * This should be called when the proxy is no longer needed.
    */
   public async close() {
-    if (this.connectionState === ConnectionState.CLOSED) return
+    if (this.connectionState === WebSocketConnectionState.CLOSED) return
 
     // Release stream readers and writers
     await this.client.reader?.cancel()
@@ -182,7 +182,7 @@ class WebSocketConnection {
       writer: undefined,
     }
 
-    this.connectionState = ConnectionState.CLOSED
+    this.connectionState = WebSocketConnectionState.CLOSED
   }
 
   /**
@@ -195,17 +195,17 @@ class WebSocketConnection {
     firstMessage: CDPRequest,
   ) {
     switch (this.connectionState) {
-      case ConnectionState.CLOSED:
+      case WebSocketConnectionState.CLOSED:
         throw new Error('Cannot connect: proxy has been closed')
-      case ConnectionState.CONNECTED:
+      case WebSocketConnectionState.CONNECTED:
         throw new Error('Cannot connect: proxy is already connected')
-      case ConnectionState.CONNECTING:
+      case WebSocketConnectionState.CONNECTING:
         throw new Error('Cannot connect: proxy is already connecting')
-      case ConnectionState.INITIALIZED:
+      case WebSocketConnectionState.INITIALIZED:
         break
     }
 
-    this.connectionState = ConnectionState.CONNECTING
+    this.connectionState = WebSocketConnectionState.CONNECTING
 
     try {
       this.browser.socket = await this.connectToBrowser(
@@ -234,7 +234,7 @@ class WebSocketConnection {
         ),
       ]
 
-      this.connectionState = ConnectionState.CONNECTED
+      this.connectionState = WebSocketConnectionState.CONNECTED
 
       // Send first message after connection is established
       await this.sendToBrowser(firstMessage)
@@ -245,8 +245,8 @@ class WebSocketConnection {
         this.close().catch(console.error)
       })
     } finally {
-      if (this.connectionState === ConnectionState.CONNECTING) {
-        this.connectionState = ConnectionState.CLOSED
+      if (this.connectionState === WebSocketConnectionState.CONNECTING) {
+        this.connectionState = WebSocketConnectionState.CLOSED
       }
     }
   }
@@ -305,7 +305,7 @@ class WebSocketConnection {
         const { value, done } = await reader.read()
         
         if (done) {
-          this.connectionState = ConnectionState.CLOSED
+          this.connectionState = WebSocketConnectionState.CLOSED
           break
         }
 
@@ -336,7 +336,7 @@ class WebSocketConnection {
    */
   private async handleMessage(
     messageText: string,
-    handler?: MessageHandler
+    handler?: WebSocketMessageHandler
   ): Promise<void> {
     try {
       const parsed = JSON.parse(messageText) as CDPRequest | CDPResponse | CDPEvent

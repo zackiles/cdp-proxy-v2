@@ -246,5 +246,36 @@ async function killProcessOnPortByName(port: string | number, pattern: RegExp): 
   }
 }
 
+/**
+ * Converts a `Record<string, string>` into an object with parsed values.
+ * - Attempts to parse numbers, booleans, and JSON objects.
+ * - Falls back to the original string if parsing fails.
+ *
+ * @param {Record<string, string>} record - The input record with string values.
+ * @returns {Record<string, unknown>} - The converted object with parsed values.
+ *
+ * @example
+ * const record = {
+ *   key1: "value1",
+ *   key2: "42",
+ *   key3: '{"nested": "object"}',
+ *   key4: "true"
+ * }
+ * const obj = recordToObject(record)
+ * console.log(obj)
+ * // Output:
+ * // { key1: "value1", key2: 42, key3: { nested: "object" }, key4: true }
+ */
+function recordToObject(record: Record<string, string>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(record).map(([key, value]) => {
+      try {
+        return [key, JSON.parse(value)]
+      } catch {
+        return [key, value]
+      }
+    })
+  )
+}
 
-export { waitForProcessExit, killProcessOnPortByName }
+export { waitForProcessExit, killProcessOnPortByName, recordToObject }

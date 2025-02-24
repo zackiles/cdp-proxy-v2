@@ -1,4 +1,5 @@
 import { bold } from 'https://deno.land/std@0.224.0/fmt/colors.ts'
+import { Config } from './config.ts'
 
 /** Supported log level names */
 export type LogLevelName =
@@ -79,8 +80,9 @@ const LEVEL_STYLES = {
  */
 export class Logger {
   private static readonly instances = new Map<string, Logger>()
-  private static readonly globalTags =
-    Deno.env.get('PROXY_LOG_TAGS')?.split(',') || []
+  private static get globalTags(): string[] {
+    return Config.get('proxyLogTags')?.split(',') || []
+  }
 
   /** Normalize a log level string to a valid LogLevelName */
   private static normalizeLogLevel = (level?: string | null): LogLevelName =>
@@ -90,16 +92,15 @@ export class Logger {
         ? (level.toLowerCase() as LogLevelName)
         : 'info'
 
-  private static globalLevel: LogLevelName = Logger.normalizeLogLevel(
-    Deno.env.get('PROXY_LOG_LEVEL'),
-  )
+  private static get globalLevel(): LogLevelName {
+    return Logger.normalizeLogLevel(
+      Config.get('proxyLogLevel')
+    )
+  }
 
   /** Clear all logger instances and refresh global configuration */
   static clearInstances(): void {
     Logger.instances.clear()
-    Logger.globalLevel = Logger.normalizeLogLevel(
-      Deno.env.get('PROXY_LOG_LEVEL'),
-    )
   }
 
   private constructor(
@@ -180,7 +181,7 @@ export class Logger {
    */
   private shouldLog(level: LogLevelName): boolean {
     const configLevel = this.config.level ?? Logger.globalLevel
-    const isDebug = Deno.env.get('PROXY_LOG_LEVEL') === 'debug'
+    const isDebug = Config.get('proxyLogLevel') === 'debug'
 
     if (isDebug) {
       console.log(
