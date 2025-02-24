@@ -82,26 +82,26 @@ async function killProcessOnPortByName(port: string | number, pattern: RegExp): 
           .map(line => line.trim().split(/\s+/).pop()!)
           .filter(Boolean);
         
-        // Distinguish between "no processes" and "command failed"
-        if (!pids.length) {
-          console.log(`No processes found listening on port ${PORT_STR}`);
-        }
+        // Return empty array for no processes - this is not an error
         return pids;
       } else {
-        const output = await runCommand({ 
-          cmd: "lsof", 
-          args: ["-i", `:${PORT_STR}`, "-sTCP:LISTEN", "-t"] 
-        });
-        const pids = output.split("\n").map(line => line.trim()).filter(Boolean);
-        
-        // Distinguish between "no processes" and "command failed"
-        if (!pids.length) {
-          console.log(`No processes found listening on port ${PORT_STR}`);
+        try {
+          const output = await runCommand({ 
+            cmd: "lsof", 
+            args: ["-i", `:${PORT_STR}`, "-sTCP:LISTEN", "-t"] 
+          });
+          const pids = output.split("\n").map(line => line.trim()).filter(Boolean);
+          return pids;
+        } catch (error: unknown) {
+          // Handle case where lsof returns no output (exit code 1)
+          if (error instanceof Error && error.message.includes("Command failed")) {
+            // No processes found - this is acceptable
+            return [];
+          }
+          throw error;
         }
-        return pids;
       }
     } catch (error: unknown) {
-      // Throw error instead of silently returning empty array
       const errorMessage = error instanceof Error ? error.message : String(error);
       throw new Error(`Failed to get PIDs for port ${PORT_STR}: ${errorMessage}`);
     }
@@ -109,7 +109,10 @@ async function killProcessOnPortByName(port: string | number, pattern: RegExp): 
 
   try {
     const pids = await getPids();
-    if (!pids.length) return;
+    if (!pids.length) {
+      console.debug(`No processes found on port ${PORT_STR}`);
+      return; // Early return for no processes
+    }
 
     if (Deno.build.os === "windows" && !isWSL) {
       try {

@@ -23,7 +23,7 @@ import { HttpHandler } from './http-handler.ts'
 
 const config = {
   proxyPort: Number(Deno.env.get('CDP_PROXY_PORT')) || getAvailablePort(),
-  proxyHost: Deno.env.get('CDP_PROXY_HOST') || 'localhost',
+  proxyHost: Deno.env.get('CDP_PROXY_HOST') || '0.0.0.0',
   browserPort: Number(Deno.env.get('CDP_BROWSER_PORT')) || getAvailablePort(),
   browserHost: Deno.env.get('CDP_BROWSER_HOST') || 'localhost',
   browserExecutablePath: Deno.env.get('CDP_BROWSER_EXECUTABLE_PATH') || '',
@@ -37,32 +37,26 @@ const browserManager = new BrowserManager(
 
 const httpHandler = new HttpHandler(config.browserHost, config.browserPort)
 
-await browserManager.start()
-console.log(`Browser debugger url started at ${browserManager.browserWebSocketDebuggerUrl}`)
-
-
-const server = Deno.serve({
-  port: config.proxyPort,
-  hostname: config.proxyHost,
-  handler: httpHandler.handle,
-  signal: ac.signal,
-  onListen({ port, hostname }) {
-    console.log(`Server started at http://${hostname}:${port!}`)
-  },
-})
-
-
 // Add signal handlers for graceful shutdown
 const handleShutdown = async () => {
+  // Show localhost for IPv6 loopback (::1) and IPv4 all interfaces on Windows (0.0.0.0)
+  const displayHost = config.proxyHost === '::1' || (Deno.build.os === 'windows' && config.proxyHost === '0.0.0.0')
+    ? 'localhost'
+    : config.proxyHost
   console.log(
-    `Closing server at http://${config.hostname}:${config.proxyPort}...`,
+    `Closing server at http://${displayHost}:${config.proxyPort}...`,
   )
-  ac.abort()
-  await browserManager.close()
-  await server.shutdown()
+  try {
+    ac.abort()
+    await browserManager.close()
+    await server.shutdown()
+  } catch (error) {
+    console.error('Error during shutdown:', error)
+    Deno.exit(1)
+  }
 }
 
-// Add signal handlers for graceful shutdown
+// Add signal handlers for graceful shutdown before starting services
 Deno.addSignalListener('SIGINT', handleShutdown)
 Deno.addSignalListener('SIGTERM', handleShutdown)
 
@@ -75,6 +69,28 @@ addEventListener('unhandledrejection', (event: PromiseRejectionEvent) => {
 addEventListener('error', (event: ErrorEvent) => {
   console.error('Uncaught exception:', event.error)
   handleShutdown()
+})
+
+await browserManager.start()
+
+const server = Deno.serve({
+  port: config.proxyPort,
+  hostname: config.proxyHost,
+  handler: httpHandler.handle,
+  signal: ac.signal,
+  onListen({ port, hostname }) {
+    // For display purposes:
+    // - If bound to all interfaces (0.0.0.0 or ::), show as localhost for Windows, actual IP otherwise
+    // - If bound to loopback (127.0.0.1, ::1), show as localhost
+    const displayHost = (hostname === '::1' || hostname === '127.0.0.1') || 
+      ((hostname === '0.0.0.0' || hostname === '::') && Deno.build.os === 'windows')
+      ? 'localhost' 
+      : hostname
+    const isAllInterfaces = hostname === '0.0.0.0' || hostname === '::'
+    console.log(
+      `Proxy server started at http://${displayHost}:${port}${isAllInterfaces ? ' and is accessible from all network interfaces!' : '!'}`
+    )
+  },
 })
 
 server.finished.then(() => {

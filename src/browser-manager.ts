@@ -11,7 +11,7 @@ interface LaunchedBrowser extends LaunchedChrome {
 }
 
 class BrowserManager {
-  #browser?: LaunchedBrowser
+  browser?: LaunchedBrowser
   browserHost: string
   browserPort: number
   browserExecutablePath: string
@@ -48,7 +48,7 @@ class BrowserManager {
     })
 
     try {
-      this.#browser = await launch({
+      this.browser = await launch({
         chromePath: this.browserExecutablePath,
         port: Number(this.browserPort),
         userDataDir: false,
@@ -70,27 +70,16 @@ class BrowserManager {
           '--allow-running-insecure-content',
           '--ignore-certificate-errors'
         ],
-        handleSIGINT: true
+        handleSIGINT: false // The proxy handles it's own SIGINT that cleans up the browser instance
       })
-      console.log('chrome-launcher.launch() returned', this.#browser)
-      // Capture process output
-      if (this.#browser?.process) {
-        this.#browser.process.stderr?.on('data', (data) => {
-          console.error('Browser stderr:', data.toString())
-        })
-        this.#browser.process.stdout?.on('data', (data) => {
-          console.debug('Browser stdout:', data.toString())
-        })
-      }
 
-      this.#browser.browserWebSocketDebuggerUrl = await this.#getCDPWebSocketUrl()
-      console.log('Browser started at', this.#browser.browserWebSocketDebuggerUrl)
+      this.browser.browserWebSocketDebuggerUrl = await this.#getCDPWebSocketUrl()
+      console.log('Browser started at', this.browser.browserWebSocketDebuggerUrl)
     } catch (error) {
-      console.error('Browser launch failed:', error)
-      if (error instanceof Error) {
-        console.error('Error message:', error.message)
-        console.error('Stack trace:', error.stack)
-      }
+      console.error('Browser failed to launch', {
+        message: error instanceof Error ? error.message : 'Unknown error',
+        stack: error instanceof Error ? error.stack : undefined
+      })
       throw error
     }
   }
@@ -101,12 +90,12 @@ class BrowserManager {
    * @throws {Error} If no browser is running or close operation times out
    */
   async close(timeout: number = 5000): Promise<void> {
-    if(!this.#browser?.pid) {
+    if(!this.browser?.pid) {
       throw new Error('Failed to close Browser, no browser running!')
     }
-    this.#browser.kill()
+    this.browser.kill()
     await killProcessOnPortByName(this.browserPort, /brave|chrome|edge/i)
-    return await waitForProcessExit(this.#browser.pid, timeout)
+    return await waitForProcessExit(this.browser.pid, timeout)
   }
 
   /**
