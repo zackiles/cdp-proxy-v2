@@ -25,8 +25,12 @@
     "@std/path": "jsr:@std/path@1",
     "@zackiles/response-rewriter": "jsr:@zackiles/response-rewriter@^0.0.3",
     "chrome-launcher": "npm:chrome-launcher@1",
-    "playwright": "npm:playwright@1",
+    "playwright": "npm:playwright@1.50.1",
     "devtools-protocol": "npm:devtools-protocol@^0.0.1422344"
+  },
+  "compilerOptions": {
+    "strict": true,
+    "lib": ["deno.window", "deno.ns", "dom"]
   },
   "fmt": {
     "include": ["*.ts"],
