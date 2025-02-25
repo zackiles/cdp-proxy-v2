@@ -93,9 +93,7 @@ export class Logger {
         : 'info'
 
   private static get globalLevel(): LogLevelName {
-    return Logger.normalizeLogLevel(
-      Config.get('proxyLogLevel')
-    )
+    return Logger.normalizeLogLevel(Config.get('proxyLogLevel'))
   }
 
   /** Clear all logger instances and refresh global configuration */

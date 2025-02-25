@@ -1,5 +1,6 @@
 {
   "deno.enable": true,
+  "deno.unstable": ["Deno", "DenoPluginA"],
   "deno.lint": true,
   "deno.enablePaths": ["src", "test", "plugins"],
   "deno.importMap": "./deno.jsonc",

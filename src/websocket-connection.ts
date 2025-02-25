@@ -35,7 +35,9 @@
 
 import type { CDPRequest, CDPResponse, CDPEvent } from './types.ts'
 
-type WebSocketMessageHandler = (message: CDPRequest | CDPResponse | CDPEvent) => void | Promise<void>
+type WebSocketMessageHandler = (
+  message: CDPRequest | CDPResponse | CDPEvent,
+) => void | Promise<void>
 
 /**
  * Represents a WebSocket endpoint with its associated streams and handlers
@@ -54,21 +56,49 @@ interface WebSocketEndpoint {
 export class WebSocketStream {
   readonly readable: ReadableStream<Uint8Array>
   readonly writable: WritableStream<Uint8Array>
+  private controller: ReadableStreamDefaultController<Uint8Array> | null = null
 
   constructor(socket: WebSocket) {
     this.readable = new ReadableStream({
-      start(controller) {
+      start: (controller) => {
+        this.controller = controller // Store controller reference
+
         socket.onmessage = (event) => {
           if (event.data instanceof Blob) {
             event.data.arrayBuffer().then((buffer) => {
-              controller.enqueue(new Uint8Array(buffer))
+              if (this.controller) {
+                // Check controller exists
+                this.controller.enqueue(new Uint8Array(buffer))
+              }
             })
           } else if (event.data instanceof ArrayBuffer) {
-            controller.enqueue(new Uint8Array(event.data))
+            if (this.controller) {
+              // Check controller exists
+              this.controller.enqueue(new Uint8Array(event.data))
+            }
           }
         }
-        socket.onclose = () => controller.close()
-        socket.onerror = (err) => controller.error(err)
+
+        socket.onclose = () => {
+          if (this.controller) {
+            // Only close if controller exists
+            this.controller.close()
+            this.controller = null // Clear reference
+          }
+        }
+
+        socket.onerror = (err) => {
+          if (this.controller) {
+            // Check controller exists
+            this.controller.error(err)
+            this.controller = null // Clear reference
+          }
+        }
+      },
+      cancel: () => {
+        if (this.controller) {
+          this.controller = null // Clear reference
+        }
       },
     })
 
@@ -76,6 +106,12 @@ export class WebSocketStream {
       write(chunk) {
         if (socket.readyState === socket.OPEN) {
           socket.send(chunk)
+        }
+      },
+      close() {
+        // Only close if socket is still open
+        if (socket.readyState === socket.OPEN) {
+          socket.close()
         }
       },
     })
@@ -136,6 +172,7 @@ class WebSocketConnection {
       throw new Error('Cannot send message: proxy is not connected')
     }
     const encoded = new TextEncoder().encode(JSON.stringify(message))
+
     await this.browser.writer?.write(encoded)
   }
 
@@ -212,7 +249,10 @@ class WebSocketConnection {
         browserWebSocketDebuggerUrl,
       )
 
-      this.client.stream = new WebSocketStream(this.client.socket!)
+      if (!this.client.socket) {
+        throw new Error('Client socket is not initialized')
+      }
+      this.client.stream = new WebSocketStream(this.client.socket)
       this.browser.stream = new WebSocketStream(this.browser.socket)
 
       this.client.reader = this.client.stream.readable.getReader()
@@ -260,7 +300,7 @@ class WebSocketConnection {
   ): Promise<WebSocket> {
     const socket = new WebSocket(browserWebSocketDebuggerUrl)
     const abortController = new AbortController()
-    
+
     // Set up timeout
     const timeoutId = setTimeout(() => {
       abortController.abort()
@@ -275,8 +315,9 @@ class WebSocketConnection {
         })
 
         socket.onopen = () => resolve()
-        socket.onclose = () => reject(new Error('Connection closed before established'))
-        socket.onerror = error => reject(error)
+        socket.onclose = () =>
+          reject(new Error('Connection closed before established'))
+        socket.onerror = (error) => reject(error)
       })
 
       return socket
@@ -296,14 +337,15 @@ class WebSocketConnection {
     direction: 'clientToBrowser' | 'browserToClient',
   ): Promise<void> {
     const decoder = new TextDecoder()
-    const messageHandler = direction === 'clientToBrowser' 
-      ? this.onClientMessage 
-      : this.onBrowserMessage
+    const messageHandler =
+      direction === 'clientToBrowser'
+        ? this.onClientMessage
+        : this.onBrowserMessage
 
     try {
       while (true) {
         const { value, done } = await reader.read()
-        
+
         if (done) {
           this.connectionState = WebSocketConnectionState.CLOSED
           break
@@ -312,10 +354,11 @@ class WebSocketConnection {
         // Process message if we have a value
         if (value) {
           const messageText = decoder.decode(value)
-          
+
           // Handle the message and continue even if parsing fails
-          await this.handleMessage(messageText, messageHandler)
-            .catch(error => console.error('Message handling error:', error))
+          await this.handleMessage(messageText, messageHandler).catch((error) =>
+            console.error('Message handling error:', error),
+          )
 
           // Always forward the raw message regardless of parsing success
           await writer.write(value)
@@ -336,10 +379,13 @@ class WebSocketConnection {
    */
   private async handleMessage(
     messageText: string,
-    handler?: WebSocketMessageHandler
+    handler?: WebSocketMessageHandler,
   ): Promise<void> {
     try {
-      const parsed = JSON.parse(messageText) as CDPRequest | CDPResponse | CDPEvent
+      const parsed = JSON.parse(messageText) as
+        | CDPRequest
+        | CDPResponse
+        | CDPEvent
       await handler?.(parsed)
     } catch (error) {
       if (error instanceof SyntaxError) {

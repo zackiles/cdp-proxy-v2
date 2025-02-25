@@ -1,4 +1,12 @@
+/**
+ * Handles HTTP request/response forwarding for the proxy.
+ * @see {@link https://chromium.googlesource.com/chromium/src/+/master/content/browser/devtools/devtools_http_handler.cc} Chromium HTTP handler source code.
+ * @see {@link CDP_HTTP_PATHS} for HTTP endpoints
+ * @see {@link CDP_HTTP_PATHS_TO_REWRITE} for HTTP paths that need to be rewritten
+ */
+
 import { replaceInResponse } from '@zackiles/response-rewriter'
+import { CDP_HTTP_PATHS, CDP_HTTP_PATHS_TO_REWRITE } from './constants.ts'
 
 class HttpHandler {
   private browserHost: string
@@ -8,44 +16,24 @@ class HttpHandler {
     this.browserPort = browserPort
   }
 
-  private async handleWebSocket(request: Request, requestUrl: URL): Promise<Response> {
-    const { socket, response } = Deno.upgradeWebSocket(request)
-    socket.addEventListener("open", () => {
-      console.log("a client connected!");
-      setInterval(() => {
-        if (socket.readyState === WebSocket.OPEN) {
-          socket.send('ping');
-        }
-      }, 30000);
-    })
-    socket.addEventListener("pong", () => {
-      console.log("Received pong, connection is healthy");
-    })
-    socket.addEventListener("error", (error) => {
-      console.error("WebSocket error:", error);
-    })
-
-    socket.addEventListener("close", () => {
-      console.log("Client disconnected");
-    })
-
-    socket.addEventListener("message", (event) => {
-      if (event.data === "ping") {
-        socket.send("pong");
-      }
-    })
-
-    return response
-  }
-
-  private async handleHttp(request: Request, requestUrl: URL): Promise<Response> {
+  private async handleHttp(
+    request: Request,
+    requestUrl: URL,
+  ): Promise<Response> {
     const handlerHost = requestUrl.hostname
     const handlerPort = requestUrl.port
     let response = await fetch(request)
     // These paths contain the webSocketDebuggerUrl, which needs to be rewritten to use the proxy host and port not the browser's
-    const responsesToRewrite = ['/json/version', '/json', '/json/list', '/json/new']
-    if (responsesToRewrite.includes(requestUrl.pathname)) {
-      response = await replaceInResponse(`${this.browserHost}:${this.browserPort}`, `${handlerHost}:${handlerPort}`, response)
+    if (
+      CDP_HTTP_PATHS_TO_REWRITE.includes(
+        requestUrl.pathname as (typeof CDP_HTTP_PATHS_TO_REWRITE)[number],
+      )
+    ) {
+      response = await replaceInResponse(
+        `${this.browserHost}:${this.browserPort}`,
+        `${handlerHost}:${handlerPort}`,
+        response,
+      )
     }
     return response
   }
@@ -53,43 +41,38 @@ class HttpHandler {
   async handle(request: Request): Promise<Response> {
     const requestUrl = new URL(request.url)
     const requestPath = requestUrl.pathname
+    console.debug('HttpHandler.handle()', {
+      requestUrl,
+      requestPath,
+    })
 
-    switch (true) {
-      case requestPath === "/json/version":
-        return await this.handleHttp(request, requestUrl)
-  
-      case (requestPath === "/json" || requestPath === "/json/list"):
-        return await this.handleHttp(request, requestUrl)
-  
-      case requestPath.startsWith("/json/protocol"):
-        return await this.handleHttp(request, requestUrl)
-  
-      case requestPath.startsWith("/json/new"):
-        return await this.handleHttp(request, requestUrl)
+    try {
+      const routeHandlers = CDP_HTTP_PATHS.map((path) => ({
+        pattern: path,
+        exact: path.indexOf('/') === path.lastIndexOf('/'),
+        handler: async () => this.handleHttp(request, requestUrl),
+      }))
 
-      case requestPath.startsWith("/json/activate/"):
-        return await this.handleHttp(request, requestUrl)
-  
-      case requestPath.startsWith("/json/close/"):
-        return await this.handleHttp(request, requestUrl)
-  
-      case requestPath.startsWith("/devtools/inspector.html"):
-        return await this.handleHttp(request, requestUrl)
-  
-      case requestPath.startsWith("/devtools/page/"):
-        return new Response("Not implemented. The CDP proxy only supports browser target commands using flatten=true", {
-          status: 404
-        })
+      const matchingRoute = routeHandlers.find(({ pattern, exact }) =>
+        exact ? requestPath === pattern : requestPath.startsWith(pattern),
+      )
 
-      case requestPath.startsWith("/devtools/browser"):
-        return await this.handleWebSocket(request, requestUrl)
+      if (matchingRoute) {
+        return await matchingRoute.handler()
+      }
 
-      default:
-        return new Response(`Not implemented. The path ${requestPath} is not found or supported by the CDP proxy`, {
-          status: 404
-        })
+      return new Response(
+        `Not implemented. The path ${requestPath} is not found or supported by the CDP proxy`,
+        { status: 404 },
+      )
+    } catch (error: unknown) {
+      console.error('Error in HttpHandler.handle():', error)
+      const errorMessage =
+        error instanceof Error ? error.message : String(error)
+      return new Response(`Internal Server Error: ${errorMessage}`, {
+        status: 500,
+      })
     }
-
   }
 }
 

@@ -9,7 +9,7 @@ await chromium.install({
   platform: 'windows',
   arch: 'x64',
   customBasePath: '.cache',
-})
+  })
 
 console.log('installed')
 */
@@ -21,25 +21,29 @@ import { Config } from './config.ts'
 import type { EnvVars } from './types.ts'
 import { recordToObject } from './utils.ts'
 import { ShutdownManager } from './shutdown-manager.ts'
+import { createRouterHandler } from './router.ts'
+
+const getProxyWebsocketDebuggerUrl = (browserWebSocketDebuggerUrl: string) => {
+  const url = new URL(browserWebSocketDebuggerUrl)
+  url.hostname = Config.get('proxyHost')
+  url.port = Config.get('proxyPort').toString()
+  return url.toString()
+}
 
 /**
  * Initializes the global Config singleton with environment variables
- * This MUST be called before any other code tries to access Config.instance
  */
 async function setupConfig(): Promise<void> {
-  const envVariables = await dotenv.load({ export: false })
-  const configOptions = await Config.create(recordToObject(envVariables) as EnvVars)
-  const config = new Config(configOptions)
-  Config.setGlobal(config)
-  
-  // Validate that the singleton was properly initialized
-  const instance = Config.instance
-  console.debug('Config singleton initialized with options:', {
-    proxyPort: instance.get('proxyPort'),
-    proxyHost: instance.get('proxyHost'),
-    browserPort: instance.get('browserPort'),
-    browserHost: instance.get('browserHost'),
-    proxyLogLevel: instance.get('proxyLogLevel')
+  const envVariables = recordToObject(await dotenv.load({ export: false }))
+  const configOptions = await Config.create(envVariables as EnvVars)
+  Config.setGlobal(new Config(configOptions))
+
+  console.debug('Config initialized with final state:', {
+    proxyPort: Config.get('proxyPort'),
+    proxyHost: Config.get('proxyHost'),
+    browserPort: Config.get('browserPort'),
+    browserHost: Config.get('browserHost'),
+    proxyLogLevel: Config.get('proxyLogLevel'),
   })
 }
 
@@ -66,25 +70,32 @@ async function setupBrowser() {
 /**
  * Sets up and starts the HTTP server
  */
-function setupServer(httpHandler: HttpHandler, shutdownManager: ShutdownManager) {
+function setupServer(
+  httpHandler: HttpHandler,
+  shutdownManager: ShutdownManager,
+) {
   const config = Config.instance
   const port = config.get('proxyPort')
   const hostname = config.get('proxyHost')
-  
-  const displayHost = (hostname === '::1' || hostname === '127.0.0.1') || 
-    ((hostname === '0.0.0.0' || hostname === '::') && Deno.build.os === 'windows')
-    ? 'localhost' 
-    : hostname
+
+  const displayHost =
+    hostname === '::1' ||
+    hostname === '127.0.0.1' ||
+    ((hostname === '0.0.0.0' || hostname === '::') &&
+      Deno.build.os === 'windows')
+      ? 'localhost'
+      : hostname
   const isAllInterfaces = hostname === '0.0.0.0' || hostname === '::'
 
   const server = Deno.serve({
     port,
     hostname,
-    handler: httpHandler.handle,
+    handler: createRouterHandler(httpHandler),
     signal: shutdownManager.signal,
-    onListen: () => console.log(
-      `Proxy server started at http://${displayHost}:${port}${isAllInterfaces ? ' and is accessible from all network interfaces!' : '!'}`
-    ),
+    onListen: () =>
+      console.log(
+        `Proxy server started at http://${displayHost}:${port}${isAllInterfaces ? ' and is accessible from all network interfaces!' : '!'}`,
+      ),
   })
 
   server.finished.then(() => {
@@ -100,22 +111,17 @@ function setupServer(httpHandler: HttpHandler, shutdownManager: ShutdownManager)
 async function main() {
   // Setup core services
   await setupConfig()
-  let shutdownManager
+  const shutdownManager = new ShutdownManager()
 
   try {
-    // Initialize shutdown manager early to catch setup errors
-    shutdownManager = new ShutdownManager()
-    const { instance: config } = Config
     const httpHandler = new HttpHandler(
-      config.get('browserHost'),
-      config.get('browserPort')
+      Config.get('browserHost'),
+      Config.get('browserPort'),
     )
 
     // Initialize browser and server
     const browserManager = await setupBrowser()
     const server = setupServer(httpHandler, shutdownManager)
-
-    // Register resources with shutdown manager
     shutdownManager.setResources(browserManager, server)
 
     const debuggerUrl = browserManager.browser?.browserWebSocketDebuggerUrl
@@ -123,12 +129,11 @@ async function main() {
       throw new Error('Browser WebSocket debugger URL not available')
     }
 
-    await connectAndNavigate(debuggerUrl)
+    await connectAndNavigate(getProxyWebsocketDebuggerUrl(debuggerUrl))
   } catch (error) {
     console.error('Error during setup:', error)
-    // Trigger shutdown sequence if we have resources to clean up
     await shutdownManager.shutdownNow()
-    throw error // Re-throw to ensure non-zero exit
+    throw error
   }
 }
 

@@ -16,7 +16,6 @@ class BrowserManager {
   browserHost: string
   browserPort: number
   browserExecutablePath: string
-  
 
   /**
    * Creates a new BrowserManager instance
@@ -24,7 +23,11 @@ class BrowserManager {
    * @param browserPort - Port for remote debugging connection
    * @param browserExecutablePath - Path to Browser executable
    */
-  constructor(browserHost: string, browserPort: number, browserExecutablePath: string) {
+  constructor(
+    browserHost: string,
+    browserPort: number,
+    browserExecutablePath: string,
+  ) {
     this.browserHost = browserHost
     this.browserPort = browserPort
     this.browserExecutablePath = browserExecutablePath
@@ -35,7 +38,9 @@ class BrowserManager {
    * @throws {Error} If browser fails to launch or CDP connection fails
    */
   async start(): Promise<void> {
-    console.debug(`Ensuring a browser is not already running on port ${this.browserPort}...`)
+    console.debug(
+      `Ensuring a browser is not already running on port ${this.browserPort}...`,
+    )
 
     await killProcessOnPortByName(this.browserPort, /brave|chrome|edge/i)
 
@@ -43,8 +48,13 @@ class BrowserManager {
       browserHost: this.browserHost,
       browserPort: this.browserPort,
       browserExecutablePath: this.browserExecutablePath,
-      browserLaunchFlags: this.simulateFinalLaunchFlags()
+      browserLaunchFlags: this.simulateFinalLaunchFlags(),
+      logLevel: Config.get('proxyLogLevel'),
     })
+
+    if (Config.get('proxyLogLevel') === 'verbose') {
+      Deno.env.set('DEBUG', 'pw:protocol')
+    }
 
     try {
       this.browser = await launch({
@@ -54,7 +64,7 @@ class BrowserManager {
         logLevel: Config.get('launcherLogLevel'),
         maxConnectionRetries: 2,
         connectionPollInterval: 500,
-        startingUrl: undefined, 
+        startingUrl: undefined,
         chromeFlags: [
           ...BROWSER_LAUNCH_FLAGS,
           Config.get('cdpLogLevelFlag'),
@@ -67,17 +77,21 @@ class BrowserManager {
           '--disable-component-update',
           '--disable-web-security',
           '--allow-running-insecure-content',
-          '--ignore-certificate-errors'
+          '--ignore-certificate-errors',
         ],
-        handleSIGINT: false // The proxy handles it's own SIGINT that cleans up the browser instance
+        handleSIGINT: false, // The proxy handles it's own SIGINT that cleans up the browser instance
       })
 
-      this.browser.browserWebSocketDebuggerUrl = await this.#getCDPWebSocketUrl()
-      console.log('Browser started at', this.browser.browserWebSocketDebuggerUrl)
+      this.browser.browserWebSocketDebuggerUrl =
+        await this.#getCDPWebSocketUrl()
+      console.log(
+        'Browser started at',
+        this.browser.browserWebSocketDebuggerUrl,
+      )
     } catch (error) {
       console.error('Browser failed to launch', {
         message: error instanceof Error ? error.message : 'Unknown error',
-        stack: error instanceof Error ? error.stack : undefined
+        stack: error instanceof Error ? error.stack : undefined,
       })
       throw error
     }
@@ -88,8 +102,8 @@ class BrowserManager {
    * @param timeout - Maximum time to wait for browser to close (ms)
    * @throws {Error} If no browser is running or close operation times out
    */
-  async close(timeout: number = 5000): Promise<void> {
-    if(!this.browser?.pid) {
+  async close(timeout = 5000): Promise<void> {
+    if (!this.browser?.pid) {
       throw new Error('Failed to close Browser, no browser running!')
     }
     this.browser.kill()
@@ -103,25 +117,25 @@ class BrowserManager {
    * 1. Start with default flags from chrome-launcher
    * 2. Add user configurable flags provided at runtime to the proxy, and attempt tosimulate the same logic chrome-launcher uses for conflict resolution with its default flags.
    * 3. Add any known intenal-flags that the proxy or chrome-launcher uses.
-   * 
+   *
    * Note: The actual flags used may differ slightly as chrome-launcher internally
    * adds some flags based on runtime conditions and platform specifics.
-   * 
+   *
    * @returns {string[]} Array of the most likely final flags used to launch the browser.
    */
   simulateFinalLaunchFlags(): string[] {
     // Default flags from chrome-launcher
     const defaultFlags = Launcher.defaultFlags()
-    
+
     const customFlagMap = new Map(
-      BROWSER_LAUNCH_FLAGS.map(flag => {
+      BROWSER_LAUNCH_FLAGS.map((flag) => {
         const [name, value] = flag.split('=')
         return [name, value]
-      })
+      }),
     )
 
     // Start with defaults that don't conflict with our custom flags
-    const finalFlags = defaultFlags.filter(flag => {
+    const finalFlags = defaultFlags.filter((flag) => {
       const [name] = flag.split('=')
       return !customFlagMap.has(name)
     })
@@ -134,10 +148,11 @@ class BrowserManager {
       // We add these only in the start() method, and they're contained neither in the user supplied flags to the proxy config nor the default flags of chrome-launcher.
       `--remote-debugging-port=${this.browserPort}`,
       `--remote-debugging-address=${this.browserHost}`,
+      Config.get('cdpLogLevelFlag'),
       // These flags are technically added by chrome-launcher internally but not exposed via defaultFlags()
       '--remote-debugging-port',
-      '--disable-setuid-sandbox', 
-      '--user-data-dir'
+      '--disable-setuid-sandbox',
+      '--user-data-dir',
     ]
     finalFlags.push(...extraFlags)
 
@@ -150,7 +165,7 @@ class BrowserManager {
    * @returns WebSocket URL for CDP connection
    * @throws {Error} If CDP endpoint is unreachable or returns invalid data
    */
-  async #getCDPWebSocketUrl(timeout: number = 5000): Promise<string> {
+  async #getCDPWebSocketUrl(timeout = 5000): Promise<string> {
     const endpoint = `http://${this.browserHost}:${this.browserPort}/json/version`
     const controller = new AbortController()
     const timeoutId = setTimeout(() => controller.abort(), timeout)
@@ -158,7 +173,7 @@ class BrowserManager {
     try {
       const response = await fetch(endpoint, { signal: controller.signal })
       clearTimeout(timeoutId)
-      
+
       if (!response.ok) {
         throw new Error(`CDP endpoint returned HTTP ${response.status}`)
       }

@@ -1,4 +1,4 @@
-import type { WebSocketStream } from "./websocket-connection.ts"
+import type { WebSocketStream } from './websocket-connection.ts'
 type TargetId = string
 type SessionId = string
 type ConnectionId = string
@@ -77,15 +77,15 @@ interface CDPPlugin {
 }
 
 interface EnvVars {
-  CDP_PROXY_PORT?: string;
-  CDP_PROXY_HOST?: string;
-  CDP_BROWSER_PORT?: string;
-  CDP_BROWSER_HOST?: string;
-  CDP_BROWSER_DIRECTORY?: string;
-  CDP_BROWSER_VERSION?: string;
-  CDP_BROWSER_EXECUTABLE_PATH?: string;
-  CDP_PROXY_LOG_LEVEL?: string;
-  CDP_PROXY_LOG_TAGS?: string;
+  CDP_PROXY_PORT?: string
+  CDP_PROXY_HOST?: string
+  CDP_BROWSER_PORT?: string
+  CDP_BROWSER_HOST?: string
+  CDP_BROWSER_DIRECTORY?: string
+  CDP_BROWSER_VERSION?: string
+  CDP_BROWSER_EXECUTABLE_PATH?: string
+  CDP_PROXY_LOG_LEVEL?: string
+  CDP_PROXY_LOG_TAGS?: string
 }
 
 export type {
@@ -100,5 +100,5 @@ export type {
   CDPResponse,
   CDPEvent,
   CDPPlugin,
-  EnvVars
+  EnvVars,
 }

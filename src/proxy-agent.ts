@@ -16,6 +16,7 @@ type TargetSearchParams =
 class ProxyAgent {
   connections: Map<ConnectionId, ProxyConnection> = new Map()
 
+  // biome-ignore lint/complexity/noUselessConstructor: <explanation>
   constructor() {}
 
   getTarget(params: TargetSearchParams): CDPTarget | undefined {
@@ -80,7 +81,10 @@ class ProxyAgent {
     // Exact implementation depends on WebSocketStream interface
   }
 
-  async createConnection(clientSocket: WebSocket, browserWebSocketDebuggerUrl: string): Promise<void> {
+  async createConnection(
+    clientSocket: WebSocket,
+    browserWebSocketDebuggerUrl: string,
+  ): Promise<void> {
     const connection = new WebSocketConnection(clientSocket)
     await connection.connect(browserWebSocketDebuggerUrl, firstMessage)
     // 1. Create a new connection ID
