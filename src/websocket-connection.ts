@@ -64,22 +64,37 @@ export class WebSocketStream {
         this.controller = controller // Store controller reference
 
         socket.onmessage = (event) => {
-          if (event.data instanceof Blob) {
-            event.data.arrayBuffer().then((buffer) => {
+          try {
+            if (event.data instanceof Blob) {
+              event.data.arrayBuffer().then((buffer) => {
+                if (this.controller) {
+                  // Check controller exists
+                  this.controller.enqueue(new Uint8Array(buffer))
+                }
+              })
+            } else if (event.data instanceof ArrayBuffer) {
               if (this.controller) {
                 // Check controller exists
-                this.controller.enqueue(new Uint8Array(buffer))
+                this.controller.enqueue(new Uint8Array(event.data))
               }
-            })
-          } else if (event.data instanceof ArrayBuffer) {
+            } else if (typeof event.data === 'string') {
+              // Handle string data by converting to Uint8Array
+              if (this.controller) {
+                this.controller.enqueue(new TextEncoder().encode(event.data))
+              }
+            }
+          } catch (error) {
+            console.error('Error processing WebSocket message:', error)
             if (this.controller) {
-              // Check controller exists
-              this.controller.enqueue(new Uint8Array(event.data))
+              this.controller.error(error)
             }
           }
         }
 
-        socket.onclose = () => {
+        socket.onclose = (event) => {
+          console.debug(
+            `WebSocket closed: code=${event.code}, reason=${event.reason}`,
+          )
           if (this.controller) {
             // Only close if controller exists
             this.controller.close()
@@ -88,6 +103,7 @@ export class WebSocketStream {
         }
 
         socket.onerror = (err) => {
+          console.error('WebSocket error in stream:', err)
           if (this.controller) {
             // Check controller exists
             this.controller.error(err)
@@ -106,12 +122,25 @@ export class WebSocketStream {
       write(chunk) {
         if (socket.readyState === socket.OPEN) {
           socket.send(chunk)
+        } else {
+          console.warn(
+            `Attempted to write to WebSocket in state: ${socket.readyState}`,
+          )
+          throw new Error(
+            `Cannot write to WebSocket in state: ${socket.readyState}`,
+          )
         }
       },
       close() {
         // Only close if socket is still open
         if (socket.readyState === socket.OPEN) {
-          socket.close()
+          socket.close(1000, 'Stream closed normally')
+        }
+      },
+      abort(reason) {
+        console.warn('WebSocket stream aborted:', reason)
+        if (socket.readyState === socket.OPEN) {
+          socket.close(1011, String(reason))
         }
       },
     })
@@ -153,6 +182,8 @@ class WebSocketConnection {
     writer: undefined,
   }
 
+  private keepaliveInterval: number | undefined
+
   constructor(
     clientSocket: WebSocket,
     onClientMessage?: WebSocketMessageHandler,
@@ -169,7 +200,9 @@ class WebSocketConnection {
    */
   public async sendToBrowser(message: CDPRequest) {
     if (this.connectionState !== WebSocketConnectionState.CONNECTED) {
-      throw new Error('Cannot send message: proxy is not connected')
+      throw new Error(
+        `Cannot send message: browser WebSocketConnectionState ${this.connectionState}`,
+      )
     }
     const encoded = new TextEncoder().encode(JSON.stringify(message))
 
@@ -194,6 +227,8 @@ class WebSocketConnection {
    */
   public async close() {
     if (this.connectionState === WebSocketConnectionState.CLOSED) return
+
+    this.stopKeepalive()
 
     // Release stream readers and writers
     await this.client.reader?.cancel()
@@ -245,22 +280,52 @@ class WebSocketConnection {
     this.connectionState = WebSocketConnectionState.CONNECTING
 
     try {
+      // Ensure client socket is ready
+      if (
+        !this.client.socket ||
+        this.client.socket.readyState !== WebSocket.OPEN
+      ) {
+        throw new Error(
+          `Client socket not ready: state=${this.client.socket?.readyState}`,
+        )
+      }
+
+      // Connect to browser
       this.browser.socket = await this.connectToBrowser(
         browserWebSocketDebuggerUrl,
       )
 
-      if (!this.client.socket) {
-        throw new Error('Client socket is not initialized')
+      if (this.client.socket && this.browser.socket) {
+        console.log('Client AND Browser socket connections established', {
+          browserReadyState: this.browser.socket.readyState,
+          clientReadyState: this.client.socket.readyState,
+        })
+      } else {
+        throw new Error(
+          `Socket connections not established: client=${this.client.socket ? 'defined' : 'undefined'}, browser=${this.browser.socket ? 'defined' : 'undefined'}`,
+        )
       }
+
+      // Create WebSocketStreams
       this.client.stream = new WebSocketStream(this.client.socket)
       this.browser.stream = new WebSocketStream(this.browser.socket)
 
+      // Get readers and writers
       this.client.reader = this.client.stream.readable.getReader()
       this.client.writer = this.client.stream.writable.getWriter()
       this.browser.reader = this.browser.stream.readable.getReader()
       this.browser.writer = this.browser.stream.writable.getWriter()
 
-      // Start message piping with Promise.all to handle errors
+      // Update connection state before sending message
+      this.connectionState = WebSocketConnectionState.CONNECTED
+      this.browser.socket.onmessage = (event) => {
+        console.log('Browser socket message received from browser:', event)
+      }
+      // Send first message after connection is established
+      await this.sendToBrowser(firstMessage)
+      console.log('First message sent to browser:', firstMessage)
+
+      // Start message piping
       const pipePromises = [
         this.pipeMessages(
           this.client.reader,
@@ -274,20 +339,20 @@ class WebSocketConnection {
         ),
       ]
 
-      this.connectionState = WebSocketConnectionState.CONNECTED
-
-      // Send first message after connection is established
-      await this.sendToBrowser(firstMessage)
-
       // Handle pipe promises in background
       Promise.all(pipePromises).catch((error) => {
         console.error('Error in message piping:', error)
         this.close().catch(console.error)
       })
-    } finally {
+
+      this.startKeepalive()
+    } catch (error) {
+      console.error('Connection error:', error)
       if (this.connectionState === WebSocketConnectionState.CONNECTING) {
         this.connectionState = WebSocketConnectionState.CLOSED
       }
+      await this.close().catch(console.error)
+      throw error
     }
   }
 
@@ -298,6 +363,10 @@ class WebSocketConnection {
   private async connectToBrowser(
     browserWebSocketDebuggerUrl: string,
   ): Promise<WebSocket> {
+    console.log(
+      'Attempting to open the first socket to the browser:',
+      browserWebSocketDebuggerUrl,
+    )
     const socket = new WebSocket(browserWebSocketDebuggerUrl)
     const abortController = new AbortController()
 
@@ -305,22 +374,28 @@ class WebSocketConnection {
     const timeoutId = setTimeout(() => {
       abortController.abort()
       socket.close()
-    }, 5000)
+    }, 10000)
 
     try {
-      await new Promise<void>((resolve, reject) => {
+      return await new Promise<WebSocket>((resolve, reject) => {
         // Use AbortController signal to handle timeout
         abortController.signal.addEventListener('abort', () => {
           reject(new Error('Connection timeout'))
         })
 
-        socket.onopen = () => resolve()
-        socket.onclose = () =>
+        socket.onopen = (event) => {
+          console.log('Browser socket opened:', socket.readyState)
+          resolve(socket)
+        }
+        socket.onclose = (event) => {
+          console.error('Browser socket closed during connection:', event)
           reject(new Error('Connection closed before established'))
-        socket.onerror = (error) => reject(error)
+        }
+        socket.onerror = (error) => {
+          console.error('Browser socket error during connection:', error)
+          reject(error)
+        }
       })
-
-      return socket
     } finally {
       clearTimeout(timeoutId)
     }
@@ -347,28 +422,44 @@ class WebSocketConnection {
         const { value, done } = await reader.read()
 
         if (done) {
-          this.connectionState = WebSocketConnectionState.CLOSED
+          console.debug(`Stream ${direction} completed normally`)
           break
         }
 
         // Process message if we have a value
         if (value) {
           const messageText = decoder.decode(value)
-
-          // Handle the message and continue even if parsing fails
-          await this.handleMessage(messageText, messageHandler).catch((error) =>
-            console.error('Message handling error:', error),
+          console.debug(
+            `${direction} raw message:`,
+            messageText.substring(0, 100) +
+              (messageText.length > 100 ? '...' : ''),
           )
 
-          // Always forward the raw message regardless of parsing success
-          await writer.write(value)
+          try {
+            // Forward the raw message
+            console.debug(`${direction} - raw bytes before write:`, value)
+            await writer.write(value)
+          } catch (error) {
+            console.error(`Error forwarding message in ${direction}:`, error)
+            throw error
+          }
+
+          // Handle the message for monitoring/logging
+          await this.handleMessage(messageText, messageHandler).catch(
+            (error) => {
+              console.warn(`Message handling error in ${direction}:`, error)
+            },
+          )
         }
       }
     } catch (error) {
-      console.error('Fatal error in message pipe:', error)
+      console.error(`Fatal error in ${direction} message pipe:`, error)
       throw error
     } finally {
-      await writer.close().catch(() => {}) // Ignore close errors
+      console.debug(`Closing ${direction} pipe writer`)
+      await writer.close().catch((error) => {
+        console.warn(`Error closing ${direction} writer:`, error)
+      })
     }
   }
 
@@ -393,6 +484,36 @@ class WebSocketConnection {
       } else {
         throw error // Rethrow non-parsing errors
       }
+    }
+  }
+
+  /**
+   * Starts a keepalive mechanism to maintain the WebSocket connection
+   */
+  private startKeepalive(intervalMs = 30000) {
+    this.keepaliveInterval = setInterval(async () => {
+      if (this.connectionState === WebSocketConnectionState.CONNECTED) {
+        try {
+          // Send a lightweight CDP command as keepalive
+          await this.sendToBrowser({
+            id: Date.now(),
+            method: 'Browser.getVersion',
+          })
+          console.debug('Keepalive ping sent')
+        } catch (error) {
+          console.warn('Keepalive failed:', error)
+        }
+      }
+    }, intervalMs)
+  }
+
+  /**
+   * Stops the keepalive mechanism
+   */
+  private stopKeepalive() {
+    if (this.keepaliveInterval) {
+      clearInterval(this.keepaliveInterval)
+      this.keepaliveInterval = undefined
     }
   }
 }

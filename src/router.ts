@@ -127,15 +127,18 @@ function handleWebSocket(request: Request): Response {
           console.log('WebSocket proxy connected and forwarding messages')
         } catch (error) {
           console.error(
-            'Failed to establish WebSocket proxy connection:',
+            'RouterHandler.handleWebSocket() Failed to establish WebSocket proxy connection:',
             error,
           )
-          socket.close(1011, 'Failed to establish connection to browser')
+          //socket.close(1011, 'Failed to establish connection to browser')
         }
       }
       // First message already handled, WebSocketConnection will handle subsequent messages
     } catch (error) {
-      console.error('Error handling WebSocket message:', error)
+      console.error(
+        'RouterHandler.handleWebSocket() Error handling WebSocket message:',
+        error,
+      )
     }
   })
 

@@ -46,7 +46,7 @@ async function connectAndNavigate(
     throw new Error(`Expected Google page title but got: ${pageTitle}`)
   }
 
-  await new Promise((resolve) => setTimeout(resolve, 10000))
+  await new Promise((resolve) => setTimeout(resolve, 30000))
   //console.debug('Closing the context...')
   // Clean up context only, let ShutdownManager handle browser cleanup
   //await context.close()

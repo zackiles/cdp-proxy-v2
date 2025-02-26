@@ -126,7 +126,7 @@ class ShutdownManager {
 
     const platformSignals =
       Deno.build.os === 'windows'
-        ? ['SIGINT', 'SIGTERM', 'SIGBREAK']
+        ? ['SIGINT', 'SIGBREAK'] // Windows only supports SIGINT and SIGBREAK
         : ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT']
 
     for (const signal of platformSignals) {

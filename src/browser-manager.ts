@@ -53,7 +53,7 @@ class BrowserManager {
     })
 
     if (Config.get('proxyLogLevel') === 'verbose') {
-      Deno.env.set('DEBUG', 'pw:protocol')
+      Deno.env.set('DEBUG', 'pw:*')
     }
 
     try {
