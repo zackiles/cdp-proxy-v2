@@ -19,12 +19,52 @@ const cdpMocksPath = new URL('./websocket-handler-mocks.jsonc', import.meta.url)
 const cdpMocksText = await Deno.readTextFile(cdpMocksPath)
 const cdpMocks = parseJsonc(cdpMocksText) as Record<string, Record<string, any>>
 
+/**
+ * Creates a WebSocketHandler instance for proxying CDP connections
+ * @param options Options for WebSocketHandler creation
+ * @returns A new WebSocketHandler instance
+ */
+function createWebSocketHandler({
+  browserHost = 'localhost',
+  browserPort,
+}: {
+  browserHost?: string
+  browserPort: number
+}) {
+  return new WebSocketHandler({
+    browserHost,
+    browserPort,
+  })
+}
+
+/**
+ * Creates a Playwright CDP connection to the specified WebSocket URL
+ * @param options Options for Playwright CDP connection
+ * @returns Promise resolving to a Playwright Browser instance
+ */
+async function createPlaywrightInstance({
+  url,
+  timeout = 2000,
+}: {
+  url: string
+  timeout?: number
+}) {
+  console.log(`Connecting Playwright to: ${url}`)
+
+  const browser = await chromium.connectOverCDP(url, {
+    timeout,
+  })
+
+  return browser
+}
+
 // Test #1: Basic WebSocket message passing test
 Deno.test('WebSocket handler properly proxies CDP messages', async () => {
-  const TEST_PORT = getAvailablePort()
+  const mockBrowserPort = await getAvailablePort()
+  const proxyPort = await getAvailablePort()
 
   const mockBrowserServer = Deno.serve({
-    port: TEST_PORT,
+    port: mockBrowserPort,
     hostname: '127.0.0.1',
     handler: (req: Request) => {
       if (req.headers.get('upgrade') !== 'websocket') {
@@ -62,54 +102,8 @@ Deno.test('WebSocket handler properly proxies CDP messages', async () => {
               sendMockResponse('Browser', 'setDownloadBehavior'),
             'Target.getTargetInfo': () =>
               sendMockResponse('Target', 'getTargetInfo'),
-            'Target.getTargets': () => sendMockResponse('Target', 'getTargets'),
             'Target.createBrowserContext': () =>
               sendMockResponse('Target', 'createBrowserContext'),
-            'Target.createTarget': () => {
-              sendMockResponse('Target', 'createTarget')
-              setTimeout(
-                () =>
-                  socket.send(JSON.stringify(cdpMocks.Target.targetCreated)),
-                10,
-              )
-            },
-            'Target.attachToTarget': () => {
-              sendMockResponse('Target', 'attachToTarget')
-              setTimeout(
-                () =>
-                  socket.send(JSON.stringify(cdpMocks.Target.attachedToTarget)),
-                10,
-              )
-            },
-            'Page.navigate': () => {
-              sendMockResponse('Page', 'navigate')
-              setTimeout(() => {
-                const navigationEvents = [
-                  cdpMocks.Page.frameStartedLoading,
-                  cdpMocks.Page.frameNavigated,
-                  cdpMocks.Page.loadEventFired,
-                ]
-
-                // The loadEventFired event has a timestamp that should be updated to current time
-                if (navigationEvents[2]?.params) {
-                  navigationEvents[2].params.timestamp = Date.now() / 1000
-                }
-
-                for (const event of navigationEvents) {
-                  socket.send(JSON.stringify(event))
-                }
-              }, 20)
-            },
-            'Runtime.evaluate': () => {
-              // Handle Runtime.evaluate specially to echo back the expression
-              const { expression } = message.params || {}
-              const mockResponse = structuredClone(cdpMocks.Runtime.evaluate)
-              if (expression && mockResponse.result?.result) {
-                mockResponse.result.result.value = expression
-              }
-              mockResponse.id = responseId
-              socket.send(JSON.stringify(mockResponse))
-            },
           }
 
           // Handle standard method patterns like *.enable
@@ -146,25 +140,22 @@ Deno.test('WebSocket handler properly proxies CDP messages', async () => {
     },
   })
 
-  // Create a WebSocketHandler instance for the proxy
-  const wsHandler = new WebSocketHandler({
-    browserHost: 'localhost',
-    browserPort: TEST_PORT,
+  // Create the WebSocketHandler using the hoisted function
+  const wsHandler = createWebSocketHandler({
+    browserPort: mockBrowserPort,
   })
 
-  const proxyServer = Deno.serve({ port: 9899 }, (req) => {
-    return wsHandler.handleWebSocket(req)
+  const proxyServer = Deno.serve({ port: proxyPort }, (req) => {
+    return wsHandler.handle(req)
   })
 
   try {
-    // Connect a real browser client (Playwright) to our proxy
-    const browser = await chromium.connectOverCDP('ws://localhost:9899', {
-      timeout: 2000, // Set a faster timeout (5 seconds instead of default 30)
+    // Connect a real browser client (Playwright) to our proxy using the hoisted function
+    const browser = await createPlaywrightInstance({
+      url: `ws://localhost:${proxyPort}`,
     })
 
     console.log('Successfully connected via CDP')
-
-    // If we got here, the connection was successful
     assertEquals(true, true)
 
     await browser.close()
@@ -181,7 +172,7 @@ Deno.test('WebSocket handler properly proxies CDP messages', async () => {
 
 // Test #2: CDP-specific test with Playwright client
 Deno.test('WebSocket handler works with Playwright CDP client', async () => {
-  const mockBrowserPort = 9223
+  const mockBrowserPort = await getAvailablePort()
   const mockBrowserHost = 'localhost'
   const mockBrowserPath =
     '/devtools/browser/c3d1e2f3-a4b5-c6d7-e8f9-0a1b2c3d4e5f'
@@ -303,12 +294,12 @@ Deno.test('WebSocket handler works with Playwright CDP client', async () => {
   )
 
   try {
-    const proxyPort = 9995
+    const proxyPort = await getAvailablePort()
     const proxyHost = 'localhost'
     const proxyServerController = new AbortController()
 
-    // Create a WebSocketHandler instance for the proxy
-    const wsHandler = new WebSocketHandler({
+    // Create a WebSocketHandler instance for the proxy using the hoisted function
+    const wsHandler = createWebSocketHandler({
       browserHost: mockBrowserHost,
       browserPort: mockBrowserPort,
     })
@@ -343,7 +334,7 @@ Deno.test('WebSocket handler works with Playwright CDP client', async () => {
           request.headers.get('upgrade') === 'websocket' &&
           url.pathname === mockBrowserPath
         ) {
-          return await wsHandler.handleWebSocket(request)
+          return await wsHandler.handle(request)
         }
 
         return new Response('Invalid request', { status: 400 })
@@ -352,16 +343,12 @@ Deno.test('WebSocket handler works with Playwright CDP client', async () => {
 
     try {
       const fakeBrowserWebsocketDebuggerUrl = `ws://${proxyHost}:${proxyPort}${mockBrowserPath}`
-      console.log(
-        `Connecting Playwright to: ${fakeBrowserWebsocketDebuggerUrl}`,
-      )
 
-      const browser = await chromium.connectOverCDP(
-        fakeBrowserWebsocketDebuggerUrl,
-        {
-          timeout: 5000, // Set a faster 5-second timeout instead of the default 30s
-        },
-      )
+      // Connect to the proxy using the hoisted function with custom timeout
+      const browser = await createPlaywrightInstance({
+        url: fakeBrowserWebsocketDebuggerUrl,
+        timeout: 5000, // Set a faster 5-second timeout instead of the default 30s
+      })
 
       try {
         const session = await browser.newBrowserCDPSession()
