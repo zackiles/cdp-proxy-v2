@@ -22,6 +22,8 @@ docs/
 !eslintrc.json
 !prettier.json
 
+# Mocks
+!test/websocket-handler-mocks.jsonc
 
 # CAUTION: It's a good practice to ignore these, but occasionally can confuse the model in agent mode when it has to install/remove dependencies
 deno.lock

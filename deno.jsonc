@@ -3,7 +3,8 @@
   "version": "0.0.1",
   "exports": "./src/mod.ts",
   "tasks": {
-    "dev": "deno run --watch --allow-all ./src/main.ts"
+    "dev": "DEBUG=pw:api deno run --watch --allow-all ./src/main.ts",
+    "test": "DEBUG=pw:api deno test --allow-all test/**/*.test.ts"
   },
   "license": "MIT",
   "description": "A powerful Chrome DevTools Protocol (CDP) proxy interceptor that enables modifying HTTP responses with advanced features like streaming JSON parsing, UTF-8 aware text chunking, and proper escape sequence handling.",
@@ -21,6 +22,7 @@
     "@std/fs": "jsr:@std/fs@1",
     "@std/http": "jsr:@std/http@1",
     "@std/io": "jsr:@std/io@^0.225.2",
+    "@std/jsonc": "jsr:@std/jsonc@^1.0.1",
     "@std/net": "jsr:@std/net@1",
     "@std/path": "jsr:@std/path@1",
     "@zackiles/response-rewriter": "jsr:@zackiles/response-rewriter@^0.0.3",

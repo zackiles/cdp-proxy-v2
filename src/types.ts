@@ -1,4 +1,4 @@
-import type { WebSocketStream } from './websocket-connection.ts'
+import type { WebSocketStream } from './websocket-handler.ts'
 type TargetId = string
 type SessionId = string
 type ConnectionId = string

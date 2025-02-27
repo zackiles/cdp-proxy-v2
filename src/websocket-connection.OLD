@@ -59,19 +59,44 @@ export class WebSocketStream {
   private controller: ReadableStreamDefaultController<Uint8Array> | null = null
 
   constructor(socket: WebSocket) {
+    console.log(
+      `WebSocketStream.constructor() creating a new connection for ${socket.url}`,
+      Deno.inspect(socket, {
+        colors: true,
+        depth: 0,
+      }),
+    )
     this.readable = new ReadableStream({
       start: (controller) => {
         this.controller = controller // Store controller reference
 
         socket.onmessage = (event) => {
+          console.log(
+            'WebSocketStream.constructor() socket.onmessage()',
+            Deno.inspect(event, {
+              colors: true,
+              depth: 0,
+            }),
+          )
           try {
             if (event.data instanceof Blob) {
-              event.data.arrayBuffer().then((buffer) => {
-                if (this.controller) {
-                  // Check controller exists
-                  this.controller.enqueue(new Uint8Array(buffer))
-                }
-              })
+              event.data
+                .arrayBuffer()
+                .then((buffer) => {
+                  if (this.controller) {
+                    // Check controller exists
+                    this.controller.enqueue(new Uint8Array(buffer))
+                  }
+                })
+                .catch((error) => {
+                  console.error(
+                    'WebSocketStream().constructor Error processing WebSocket message:',
+                    error,
+                  )
+                  if (this.controller) {
+                    this.controller.error(error)
+                  }
+                })
             } else if (event.data instanceof ArrayBuffer) {
               if (this.controller) {
                 // Check controller exists
@@ -102,11 +127,17 @@ export class WebSocketStream {
           }
         }
 
-        socket.onerror = (err) => {
-          console.error('WebSocket error in stream:', err)
+        socket.onerror = (event) => {
+          console.error(
+            'WebSocketStream.constructor socket.onerror(). WebSocket stream error!',
+            Deno.inspect(event.error, {
+              colors: true,
+              depth: 0,
+            }),
+          )
           if (this.controller) {
             // Check controller exists
-            this.controller.error(err)
+            this.controller.error(event.error)
             this.controller = null // Clear reference
           }
         }
@@ -183,6 +214,7 @@ class WebSocketConnection {
   }
 
   private keepaliveInterval: number | undefined
+  private connectionStartTime: number | undefined
 
   constructor(
     clientSocket: WebSocket,
@@ -195,18 +227,150 @@ class WebSocketConnection {
   }
 
   /**
+   * Establishes a connection to Chrome DevTools and starts proxying messages
+   * between the client and browser.
+   * @throws {Error} If the proxy is closed or already connected/connecting
+   */
+  public async connect(
+    browserWebSocketDebuggerUrl: string,
+    firstMessage: CDPRequest,
+  ) {
+    this.connectionStartTime = Date.now()
+
+    // Log the attempt with specific URL details
+    console.debug('WebSocketConnection.connect() - Attempting connection:', {
+      url: browserWebSocketDebuggerUrl,
+      timestamp: new Date().toISOString(),
+      messageId: firstMessage?.id,
+    })
+
+    switch (this.connectionState) {
+      case WebSocketConnectionState.CLOSED:
+        throw new Error('Cannot connect: proxy has been closed')
+      case WebSocketConnectionState.CONNECTED:
+        throw new Error('Cannot connect: proxy is already connected')
+      case WebSocketConnectionState.CONNECTING:
+        throw new Error('Cannot connect: proxy is already connecting')
+      case WebSocketConnectionState.INITIALIZED:
+        break
+    }
+
+    this.connectionState = WebSocketConnectionState.CONNECTING
+
+    try {
+      // Ensure client socket is ready
+      if (
+        !this.client.socket ||
+        this.client.socket.readyState !== WebSocket.OPEN
+      ) {
+        throw new Error(
+          `Client socket not ready: state=${this.client.socket?.readyState}`,
+        )
+      }
+
+      // Connect to browser
+      this.browser.socket = await this.connectToBrowser(
+        browserWebSocketDebuggerUrl,
+      )
+
+      // Set the browser socket to use the same binary type as the client
+      this.browser.socket.binaryType = this.client.socket.binaryType
+
+      if (this.client.socket && this.browser.socket) {
+        console.log('Client AND Browser socket connections established', {
+          browserReadyState: this.browser.socket.readyState,
+          clientReadyState: this.client.socket.readyState,
+          clientBinaryType: this.client.socket.binaryType,
+          browserBinaryType: this.browser.socket.binaryType,
+          clientUrl: this.client.socket.url,
+          browserUrl: this.browser.socket.url,
+        })
+      } else {
+        throw new Error(
+          `Socket connections not established: client=${this.client.socket ? 'defined' : 'undefined'}, browser=${this.browser.socket ? 'defined' : 'undefined'}`,
+        )
+      }
+
+      // Create WebSocketStreams
+      this.client.stream = new WebSocketStream(this.client.socket)
+      this.browser.stream = new WebSocketStream(this.browser.socket)
+
+      // Get readers and writers
+      this.client.reader = this.client.stream.readable.getReader()
+      this.client.writer = this.client.stream.writable.getWriter()
+      this.browser.reader = this.browser.stream.readable.getReader()
+      this.browser.writer = this.browser.stream.writable.getWriter()
+
+      // Update connection state before sending message
+      this.connectionState = WebSocketConnectionState.CONNECTED
+      //this.browser.socket.onmessage = (event) => {
+      //  console.log('Browser socket message received from browser:', event)
+      //}
+
+      // Start message piping
+      const pipePromises = [
+        this.pipeMessages(
+          this.client.reader,
+          this.browser.writer,
+          'clientToBrowser',
+        ),
+        this.pipeMessages(
+          this.browser.reader,
+          this.client.writer,
+          'browserToClient',
+        ),
+      ]
+
+      // Handle pipe promises in background
+      Promise.all(pipePromises).catch((error) => {
+        console.error('Error in message piping:', error)
+        this.close().catch(console.error)
+      })
+      // Send first message after connection is established
+      await this.sendToBrowser(firstMessage)
+      console.log('First message sent to browser:', firstMessage)
+
+      //this.startKeepalive()
+
+      // Add timing logs after successful connection
+      this.browser.socket.addEventListener('open', () => {
+        const connectionTime = Date.now() - this.connectionStartTime
+        console.debug(`Browser socket opened after ${connectionTime}ms`)
+      })
+    } catch (error) {
+      console.error('Connection error:', error)
+      if (this.connectionState === WebSocketConnectionState.CONNECTING) {
+        this.connectionState = WebSocketConnectionState.CLOSED
+      }
+      await this.close().catch(console.error)
+      throw error
+    }
+  }
+
+  /**
    * Sends a message to the browser over the proxy connection
    * @throws {Error} If the proxy is not connected
    */
   public async sendToBrowser(message: CDPRequest) {
+    console.log('WebSocketConnection.sendToBrowser()')
     if (this.connectionState !== WebSocketConnectionState.CONNECTED) {
       throw new Error(
         `Cannot send message: browser WebSocketConnectionState ${this.connectionState}`,
       )
     }
     const encoded = new TextEncoder().encode(JSON.stringify(message))
-
-    await this.browser.writer?.write(encoded)
+    console.log(
+      'WebSocketConnection.sendToBrowser() writing to writer encoded:',
+      encoded,
+    )
+    try {
+      await this.browser.writer?.write(encoded)
+    } catch (error) {
+      console.error(
+        'WebSocketConnection.sendToBrowser() error writing to writer:',
+        error,
+      )
+    }
   }
 
   /**
@@ -214,6 +378,7 @@ class WebSocketConnection {
    * @throws {Error} If the proxy is not connected
    */
   public async sendToClient(message: CDPResponse | CDPEvent) {
+    console.log('WebSocketConnection.sendToClient()')
     if (this.connectionState !== WebSocketConnectionState.CONNECTED) {
       throw new Error('Cannot send message: proxy is not connected')
     }
@@ -258,105 +423,6 @@ class WebSocketConnection {
   }
 
   /**
-   * Establishes a connection to Chrome DevTools and starts proxying messages
-   * between the client and browser.
-   * @throws {Error} If the proxy is closed or already connected/connecting
-   */
-  public async connect(
-    browserWebSocketDebuggerUrl: string,
-    firstMessage: CDPRequest,
-  ) {
-    switch (this.connectionState) {
-      case WebSocketConnectionState.CLOSED:
-        throw new Error('Cannot connect: proxy has been closed')
-      case WebSocketConnectionState.CONNECTED:
-        throw new Error('Cannot connect: proxy is already connected')
-      case WebSocketConnectionState.CONNECTING:
-        throw new Error('Cannot connect: proxy is already connecting')
-      case WebSocketConnectionState.INITIALIZED:
-        break
-    }
-
-    this.connectionState = WebSocketConnectionState.CONNECTING
-
-    try {
-      // Ensure client socket is ready
-      if (
-        !this.client.socket ||
-        this.client.socket.readyState !== WebSocket.OPEN
-      ) {
-        throw new Error(
-          `Client socket not ready: state=${this.client.socket?.readyState}`,
-        )
-      }
-
-      // Connect to browser
-      this.browser.socket = await this.connectToBrowser(
-        browserWebSocketDebuggerUrl,
-      )
-
-      if (this.client.socket && this.browser.socket) {
-        console.log('Client AND Browser socket connections established', {
-          browserReadyState: this.browser.socket.readyState,
-          clientReadyState: this.client.socket.readyState,
-        })
-      } else {
-        throw new Error(
-          `Socket connections not established: client=${this.client.socket ? 'defined' : 'undefined'}, browser=${this.browser.socket ? 'defined' : 'undefined'}`,
-        )
-      }
-
-      // Create WebSocketStreams
-      this.client.stream = new WebSocketStream(this.client.socket)
-      this.browser.stream = new WebSocketStream(this.browser.socket)
-
-      // Get readers and writers
-      this.client.reader = this.client.stream.readable.getReader()
-      this.client.writer = this.client.stream.writable.getWriter()
-      this.browser.reader = this.browser.stream.readable.getReader()
-      this.browser.writer = this.browser.stream.writable.getWriter()
-
-      // Update connection state before sending message
-      this.connectionState = WebSocketConnectionState.CONNECTED
-      this.browser.socket.onmessage = (event) => {
-        console.log('Browser socket message received from browser:', event)
-      }
-      // Send first message after connection is established
-      await this.sendToBrowser(firstMessage)
-      console.log('First message sent to browser:', firstMessage)
-
-      // Start message piping
-      const pipePromises = [
-        this.pipeMessages(
-          this.client.reader,
-          this.browser.writer,
-          'clientToBrowser',
-        ),
-        this.pipeMessages(
-          this.browser.reader,
-          this.client.writer,
-          'browserToClient',
-        ),
-      ]
-
-      // Handle pipe promises in background
-      Promise.all(pipePromises).catch((error) => {
-        console.error('Error in message piping:', error)
-        this.close().catch(console.error)
-      })
-
-      this.startKeepalive()
-    } catch (error) {
-      console.error('Connection error:', error)
-      if (this.connectionState === WebSocketConnectionState.CONNECTING) {
-        this.connectionState = WebSocketConnectionState.CLOSED
-      }
-      await this.close().catch(console.error)
-      throw error
-    }
-  }
-
-  /**
    * Connects to Chrome DevTools debugging endpoint.
    * @returns Promise resolving to the browser WebSocket connection
    */
@@ -388,7 +454,13 @@ class WebSocketConnection {
           resolve(socket)
         }
         socket.onclose = (event) => {
-          console.error('Browser socket closed during connection:', event)
+          console.error(
+            'Browser socket closed during connection:',
+            Deno.inspect(event, {
+              colors: true,
+              depth: 0,
+            }),
+          )
           reject(new Error('Connection closed before established'))
         }
         socket.onerror = (error) => {
@@ -419,15 +491,24 @@ class WebSocketConnection {
 
     try {
       while (true) {
+        console.debug(
+          `pipeMessages() Stream ${direction} awaiting pipeMessages reader.read()...`,
+        )
         const { value, done } = await reader.read()
 
         if (done) {
-          console.debug(`Stream ${direction} completed normally`)
+          console.debug(
+            `pipeMessages() Stream ${direction} completed normally`,
+            { done },
+          )
           break
         }
 
         // Process message if we have a value
         if (value) {
+          console.debug(
+            `pipeMessages() ${direction} - value found, calling decoder.decode(value)`,
+          )
           const messageText = decoder.decode(value)
           console.debug(
             `${direction} raw message:`,
@@ -457,9 +538,6 @@ class WebSocketConnection {
       throw error
     } finally {
       console.debug(`Closing ${direction} pipe writer`)
-      await writer.close().catch((error) => {
-        console.warn(`Error closing ${direction} writer:`, error)
-      })
     }
   }
 
@@ -491,6 +569,7 @@ class WebSocketConnection {
    * Starts a keepalive mechanism to maintain the WebSocket connection
    */
   private startKeepalive(intervalMs = 30000) {
+    console.log('WebSocketConnection.startKeepalive()')
     this.keepaliveInterval = setInterval(async () => {
       if (this.connectionState === WebSocketConnectionState.CONNECTED) {
         try {

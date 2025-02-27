@@ -52,10 +52,6 @@ class BrowserManager {
       logLevel: Config.get('proxyLogLevel'),
     })
 
-    if (Config.get('proxyLogLevel') === 'verbose') {
-      Deno.env.set('DEBUG', 'pw:*')
-    }
-
     try {
       this.browser = await launch({
         chromePath: this.browserExecutablePath,

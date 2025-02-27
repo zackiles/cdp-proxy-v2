@@ -22,7 +22,7 @@
 import { waitForProcessExit, killProcessOnPortByName } from './utils.ts'
 import type { BrowserManager } from './browser-manager.ts'
 import { Config } from './config.ts'
-import type { WebSocketConnection } from './websocket-connection.ts'
+import type { WebSocketConnection } from './websocket-handler.ts'
 
 const ABORT_CONTROLLER = new AbortController()
 

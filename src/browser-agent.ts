@@ -1,3 +1,4 @@
+//Deno.env.set('DEBUG', 'pw:api')
 import { chromium } from 'playwright'
 
 const filterPlaywrightLogs = {
@@ -20,9 +21,22 @@ async function connectAndNavigate(
 ): Promise<void> {
   // Suppress specific warning about createConnection
   //filterPlaywrightLogs.suppressCreateConnectionWarning()
-  console.debug('Attempting to connect to browser through the proxy...')
+  console.debug(
+    'Attempting to connect to browser through the proxy through Playwright client...',
+  )
   // Connect to the existing browser instance using CDP
-  const browser = await chromium.connectOverCDP(browserWebSocketDebuggerUrl)
+
+  const browser = await chromium.connectOverCDP(browserWebSocketDebuggerUrl, {
+    slowMo: 10000,
+    logger: {
+      isEnabled: () => true,
+      log: (name, severity, message, args) =>
+        console.log(
+          `PLAYWRIGHT CLIENT LOG:${severity} ${name} ${message}`,
+          args,
+        ),
+    },
+  })
   console.debug('Connected to browser through the proxy over CDP!', {
     browserWebSocketDebuggerUrl,
   })

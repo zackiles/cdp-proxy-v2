@@ -1,4 +1,4 @@
-import { WebSocketConnection } from './websocket-connection.ts'
+import { WebSocketConnection } from './websocket-handler.ts'
 import type {
   ProxyConnection,
   CDPTarget,
