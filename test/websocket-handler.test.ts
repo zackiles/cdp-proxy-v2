@@ -10,48 +10,19 @@
 import { assertEquals } from '@std/assert'
 import { delay } from '@std/async'
 import { parse as parseJsonc } from '@std/jsonc'
+import { getAvailablePort } from '@std/net'
 // @ts-ignore: Playwright types not fully recognized
 import { chromium } from 'playwright'
 import { connect } from '../src/websocket-handler.ts'
 
-// Import CDP mock responses from the JSONC file
-// Since we're using Deno, we'll use Deno's built-in file system API
 const cdpMocksPath = new URL('./websocket-handler-mocks.jsonc', import.meta.url)
 const cdpMocksText = await Deno.readTextFile(cdpMocksPath)
-
-// Parse the JSONC file using the official parser
 const cdpMocks = parseJsonc(cdpMocksText) as Record<string, Record<string, any>>
-
-// We don't need these anymore as we'll use the mocks from the file
-// const CLIENT_CDP_GET_VERSION_REQUEST = {
-//   id: 1,
-//   method: 'Browser.getVersion',
-// }
-//
-// const BROWSER_CDP_GET_VERSION_RESPONSE = {
-//   id: 1,
-//   result: {
-//     protocolVersion: '1.3',
-//     product: 'Chrome/120.0.6099.129',
-//     revision: '@c712e335-5aef-4617-9819-804c2da9',
-//     userAgent:
-//       'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.129 Safari/537.36',
-//     jsVersion: '12.0.267.8',
-//   },
-// }
-
-// Helper function to ensure we use valid WebSocket close codes (1000-4999)
-function getValidCloseCode(code: number): number {
-  if (code < 1000 || code > 4999) {
-    return 1000 // Normal closure
-  }
-  return code
-}
 
 // Test #1: Basic WebSocket message passing test
 Deno.test('WebSocket handler properly proxies CDP messages', async () => {
-  const TEST_PORT = 9898
-  // Create a mock browser WebSocket server
+  const TEST_PORT = getAvailablePort()
+
   const mockBrowserServer = Deno.serve({
     port: TEST_PORT,
     hostname: '127.0.0.1',
@@ -66,7 +37,6 @@ Deno.test('WebSocket handler properly proxies CDP messages', async () => {
         console.log('Mock browser connection opened')
       }
 
-      // The browser socket receives a message and responds based on our mocks
       socket.onmessage = (event) => {
         try {
           const message = JSON.parse(event.data)
@@ -97,7 +67,6 @@ Deno.test('WebSocket handler properly proxies CDP messages', async () => {
               sendMockResponse('Target', 'createBrowserContext'),
             'Target.createTarget': () => {
               sendMockResponse('Target', 'createTarget')
-              // After creating a target, send the Target.targetCreated event
               setTimeout(
                 () =>
                   socket.send(JSON.stringify(cdpMocks.Target.targetCreated)),
@@ -106,7 +75,6 @@ Deno.test('WebSocket handler properly proxies CDP messages', async () => {
             },
             'Target.attachToTarget': () => {
               sendMockResponse('Target', 'attachToTarget')
-              // Then send the Target.attachedToTarget event
               setTimeout(
                 () =>
                   socket.send(JSON.stringify(cdpMocks.Target.attachedToTarget)),
@@ -115,9 +83,7 @@ Deno.test('WebSocket handler properly proxies CDP messages', async () => {
             },
             'Page.navigate': () => {
               sendMockResponse('Page', 'navigate')
-              // Send navigation events
               setTimeout(() => {
-                // Use mocks from the JSONC file for navigation events
                 const navigationEvents = [
                   cdpMocks.Page.frameStartedLoading,
                   cdpMocks.Page.frameNavigated,
@@ -138,7 +104,6 @@ Deno.test('WebSocket handler properly proxies CDP messages', async () => {
               // Handle Runtime.evaluate specially to echo back the expression
               const { expression } = message.params || {}
               const mockResponse = structuredClone(cdpMocks.Runtime.evaluate)
-              // Set the expression value in the response
               if (expression && mockResponse.result?.result) {
                 mockResponse.result.result.value = expression
               }
@@ -149,7 +114,6 @@ Deno.test('WebSocket handler properly proxies CDP messages', async () => {
 
           // Handle standard method patterns like *.enable
           if (method?.includes('.enable')) {
-            // Handle various enable requests generically
             const [domain] = method.split('.')
             const mockResponse = { id: responseId, result: {} }
 
@@ -160,14 +124,9 @@ Deno.test('WebSocket handler properly proxies CDP messages', async () => {
             }
 
             socket.send(JSON.stringify(mockResponse))
-          }
-          // Look up specific handler from map
-          else if (methodHandlers[method]) {
+          } else if (methodHandlers[method]) {
             methodHandlers[method]()
-          }
-          // Default case: return simple success
-          else {
-            // For any other request, return a simple success result
+          } else {
             socket.send(JSON.stringify({ id: responseId, result: {} }))
           }
         } catch (err) {
@@ -187,7 +146,6 @@ Deno.test('WebSocket handler properly proxies CDP messages', async () => {
     },
   })
 
-  // Set up our WebSocket handler proxy
   const proxyServer = Deno.serve({ port: 9899 }, (req) => {
     return connect(req, `ws://localhost:${TEST_PORT}`)
   })
@@ -195,7 +153,7 @@ Deno.test('WebSocket handler properly proxies CDP messages', async () => {
   try {
     // Connect a real browser client (Playwright) to our proxy
     const browser = await chromium.connectOverCDP('ws://localhost:9899', {
-      timeout: 5000, // Set a faster timeout (5 seconds instead of default 30)
+      timeout: 2000, // Set a faster timeout (5 seconds instead of default 30)
     })
 
     console.log('Successfully connected via CDP')
@@ -203,31 +161,26 @@ Deno.test('WebSocket handler properly proxies CDP messages', async () => {
     // If we got here, the connection was successful
     assertEquals(true, true)
 
-    // Close browser cleanly
     await browser.close()
   } catch (err) {
     console.error('Test failed:', err)
     throw err
   } finally {
-    // Ensure servers are closed
     proxyServer.shutdown()
     mockBrowserServer.shutdown()
 
-    // Short delay to allow cleanup
     await delay(100)
   }
 })
 
 // Test #2: CDP-specific test with Playwright client
 Deno.test('WebSocket handler works with Playwright CDP client', async () => {
-  // Setup a mock CDP browser server
   const mockBrowserPort = 9223
   const mockBrowserHost = 'localhost'
   const mockBrowserPath =
     '/devtools/browser/c3d1e2f3-a4b5-c6d7-e8f9-0a1b2c3d4e5f'
   const mockBrowserServerController = new AbortController()
 
-  // Setup the mock CDP browser server
   const mockCdpBrowserServer = Deno.serve(
     {
       port: mockBrowserPort,
@@ -243,7 +196,6 @@ Deno.test('WebSocket handler works with Playwright CDP client', async () => {
 
       // Handle HTTP endpoint requests
       if (request.method === 'GET' && url.pathname === '/json/version') {
-        // This is what browsers typically respond with to a /json/version request
         return new Response(
           JSON.stringify({
             Browser: 'Chrome/120.0.6099.129',
@@ -267,7 +219,6 @@ Deno.test('WebSocket handler works with Playwright CDP client', async () => {
       ) {
         const { socket, response } = Deno.upgradeWebSocket(request)
 
-        // Handle messages from the client (via proxy)
         socket.onmessage = (event) => {
           const message =
             typeof event.data === 'string'
@@ -277,7 +228,6 @@ Deno.test('WebSocket handler works with Playwright CDP client', async () => {
           console.log('Mock CDP Browser received:', message)
 
           try {
-            // Parse the incoming CDP message
             const parsedMessage = JSON.parse(message)
             const { id, method } = parsedMessage
 
@@ -287,13 +237,11 @@ Deno.test('WebSocket handler works with Playwright CDP client', async () => {
             const sendMockResponse = (domain: string, command: string) => {
               const mockResponse = structuredClone(cdpMocks[domain][command])
               if (!mockResponse?.method) {
-                // It's a response, not an event
                 mockResponse.id = id
                 socket.send(JSON.stringify(mockResponse))
               }
             }
 
-            // Helper for generic responses
             const sendGenericResponse = () => {
               socket.send(JSON.stringify({ id, result: {} }))
             }
@@ -308,20 +256,15 @@ Deno.test('WebSocket handler works with Playwright CDP client', async () => {
               } else {
                 sendGenericResponse()
               }
-            }
-            // Handle Runtime.evaluate specially to echo back the expression
-            else if (method === 'Runtime.evaluate') {
+            } else if (method === 'Runtime.evaluate') {
               const { expression } = parsedMessage.params || {}
               const mockResponse = structuredClone(cdpMocks.Runtime.evaluate)
-              // Set the expression value in the response
               if (expression && mockResponse.result?.result) {
                 mockResponse.result.result.value = expression
               }
               mockResponse.id = id
               socket.send(JSON.stringify(mockResponse))
-            }
-            // Find command in domain.command format
-            else if (method?.includes('.')) {
+            } else if (method?.includes('.')) {
               const [domain, command] = method.split('.')
               if (cdpMocks[domain]?.[command]) {
                 sendMockResponse(domain, command)
@@ -331,9 +274,7 @@ Deno.test('WebSocket handler works with Playwright CDP client', async () => {
                 )
                 sendGenericResponse()
               }
-            }
-            // Default case
-            else {
+            } else {
               console.log(
                 `No mock found for: ${method}, using generic success response`,
               )
@@ -356,12 +297,10 @@ Deno.test('WebSocket handler works with Playwright CDP client', async () => {
   )
 
   try {
-    // Setup a proxy server for CDP
     const proxyPort = 9995
     const proxyHost = 'localhost'
     const proxyServerController = new AbortController()
 
-    // Start the proxy server
     const proxyServer = Deno.serve(
       {
         port: proxyPort,
@@ -375,7 +314,6 @@ Deno.test('WebSocket handler works with Playwright CDP client', async () => {
       async (request) => {
         const url = new URL(request.url)
 
-        // If this is a request for the browser's JSON version endpoint, proxy it
         if (request.method === 'GET' && url.pathname === '/json/version') {
           const browserVersionUrl = `http://${mockBrowserHost}:${mockBrowserPort}/json/version`
           const browserResponse = await fetch(browserVersionUrl)
@@ -389,7 +327,6 @@ Deno.test('WebSocket handler works with Playwright CDP client', async () => {
           })
         }
 
-        // Handle WebSocket upgrade for the CDP endpoint
         if (
           request.headers.get('upgrade') === 'websocket' &&
           url.pathname === mockBrowserPath
@@ -403,7 +340,6 @@ Deno.test('WebSocket handler works with Playwright CDP client', async () => {
     )
 
     try {
-      // Connect Playwright CDP client to our proxy with a faster timeout
       const fakeBrowserWebsocketDebuggerUrl = `ws://${proxyHost}:${proxyPort}${mockBrowserPath}`
       console.log(
         `Connecting Playwright to: ${fakeBrowserWebsocketDebuggerUrl}`,
@@ -425,30 +361,21 @@ Deno.test('WebSocket handler works with Playwright CDP client', async () => {
         )
       } catch (error) {
         console.error('Error during Runtime.evaluate:', error)
-        throw error // Re-throw to fail the test
+        throw error
       }
 
-      // If we reach here, the connection was successful
       console.log('Playwright CDP connection successful!')
 
-      // Test passed!
       assertEquals(true, true)
 
-      // Clean up
       await browser.close()
-
-      // Add a delay to allow for connection closure
       await delay(100)
     } finally {
-      // Shutdown the proxy server
       proxyServerController.abort()
       await proxyServer.finished
-
-      // Wait a bit for resources to be cleaned up
       await delay(100)
     }
   } finally {
-    // Shutdown the mock browser server
     mockBrowserServerController.abort()
     await mockCdpBrowserServer.finished
   }
