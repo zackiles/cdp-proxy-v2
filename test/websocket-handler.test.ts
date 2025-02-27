@@ -13,7 +13,7 @@ import { parse as parseJsonc } from '@std/jsonc'
 import { getAvailablePort } from '@std/net'
 // @ts-ignore: Playwright types not fully recognized
 import { chromium } from 'playwright'
-import { connect } from '../src/websocket-handler.ts'
+import { WebSocketHandler } from '../src/websocket-handler.ts'
 
 const cdpMocksPath = new URL('./websocket-handler-mocks.jsonc', import.meta.url)
 const cdpMocksText = await Deno.readTextFile(cdpMocksPath)
@@ -146,8 +146,14 @@ Deno.test('WebSocket handler properly proxies CDP messages', async () => {
     },
   })
 
+  // Create a WebSocketHandler instance for the proxy
+  const wsHandler = new WebSocketHandler({
+    browserHost: 'localhost',
+    browserPort: TEST_PORT,
+  })
+
   const proxyServer = Deno.serve({ port: 9899 }, (req) => {
-    return connect(req, `ws://localhost:${TEST_PORT}`)
+    return wsHandler.handleWebSocket(req)
   })
 
   try {
@@ -301,6 +307,12 @@ Deno.test('WebSocket handler works with Playwright CDP client', async () => {
     const proxyHost = 'localhost'
     const proxyServerController = new AbortController()
 
+    // Create a WebSocketHandler instance for the proxy
+    const wsHandler = new WebSocketHandler({
+      browserHost: mockBrowserHost,
+      browserPort: mockBrowserPort,
+    })
+
     const proxyServer = Deno.serve(
       {
         port: proxyPort,
@@ -331,8 +343,7 @@ Deno.test('WebSocket handler works with Playwright CDP client', async () => {
           request.headers.get('upgrade') === 'websocket' &&
           url.pathname === mockBrowserPath
         ) {
-          const browserWebSocketUrl = `ws://${mockBrowserHost}:${mockBrowserPort}${mockBrowserPath}`
-          return await connect(request, browserWebSocketUrl)
+          return await wsHandler.handleWebSocket(request)
         }
 
         return new Response('Invalid request', { status: 400 })

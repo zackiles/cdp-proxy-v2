@@ -16,9 +16,10 @@ console.log('installed')
 import * as dotenv from '@std/dotenv'
 import { BrowserManager } from './browser-manager.ts'
 import { HttpHandler } from './http-handler.ts'
+import { WebSocketHandler } from './websocket-handler.ts'
 import { connectAndNavigate } from './browser-agent.ts'
 import { Config } from './config.ts'
-import type { EnvVars } from './types.ts'
+import type { EnvVars, HandlerOptions } from './types.ts'
 import { recordToObject } from './utils.ts'
 import { ShutdownManager } from './shutdown-manager.ts'
 import { createRouterHandler } from './router.ts'
@@ -72,6 +73,7 @@ async function setupBrowser() {
  */
 function setupServer(
   httpHandler: HttpHandler,
+  webSocketHandler: WebSocketHandler,
   shutdownManager: ShutdownManager,
 ) {
   const config = Config.instance
@@ -90,7 +92,7 @@ function setupServer(
   const server = Deno.serve({
     port,
     hostname,
-    handler: createRouterHandler(httpHandler),
+    handler: createRouterHandler(httpHandler, webSocketHandler),
     signal: shutdownManager.signal,
     onListen: () =>
       console.log(
@@ -114,20 +116,22 @@ async function main() {
   const shutdownManager = new ShutdownManager()
 
   try {
-    const httpHandler = new HttpHandler(
-      Config.get('browserHost'),
-      Config.get('browserPort'),
-    )
-
-    // Initialize browser and server
     const browserManager = await setupBrowser()
-    const server = setupServer(httpHandler, shutdownManager)
-    shutdownManager.setResources(browserManager, server)
-
     const debuggerUrl = browserManager.browser?.browserWebSocketDebuggerUrl
     if (!debuggerUrl) {
       throw new Error('Browser WebSocket debugger URL not available')
     }
+
+    const handlerOptions: HandlerOptions = {
+      browserHost: Config.get('browserHost'),
+      browserPort: Config.get('browserPort'),
+    }
+
+    const httpHandler = new HttpHandler(handlerOptions)
+    const webSocketHandler = new WebSocketHandler(handlerOptions)
+
+    const server = setupServer(httpHandler, webSocketHandler, shutdownManager)
+    shutdownManager.setResources(browserManager, server)
 
     await connectAndNavigate(getProxyWebsocketDebuggerUrl(debuggerUrl))
   } catch (error) {

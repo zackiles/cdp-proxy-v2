@@ -1,7 +1,33 @@
-import type { WebSocketStream } from './websocket-handler.ts'
 type TargetId = string
 type SessionId = string
 type ConnectionId = string
+
+/**
+ * Options for initializing an HTTP handler
+ */
+interface HandlerOptions {
+  /**
+   * The host address of the browser being proxied
+   */
+  browserHost: string
+
+  /**
+   * The port number of the browser being proxied
+   */
+  browserPort: number
+}
+
+/**
+ * Interface for HTTP request handling in the CDP proxy
+ */
+interface HandlerInterface {
+  /**
+   * Handles incoming HTTP requests and routes them appropriately
+   * @param request The incoming request to handle
+   * @returns A Promise resolving to the HTTP response
+   */
+  handle(request: Request): Promise<Response>
+}
 
 interface CDPTarget {
   sessionId: SessionId
@@ -30,8 +56,6 @@ interface ProxyConnection {
    *  example: "ws://localhost:9222/devtools/browser/b0b8a4fb-bb17-4359-9533-a8d9f3908bd8"
    */
   browserWebSocketDebuggerUrl: string
-  clientWebsocketStream: WebSocketStream
-  browserWebsocketStream: WebSocketStream
 
   targets: Map<TargetId, CDPTarget>
 }
@@ -101,4 +125,6 @@ export type {
   CDPEvent,
   CDPPlugin,
   EnvVars,
+  HandlerInterface,
+  HandlerOptions,
 }

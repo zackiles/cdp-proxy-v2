@@ -7,13 +7,19 @@
 
 import { replaceInResponse } from '@zackiles/response-rewriter'
 import { CDP_HTTP_PATHS, CDP_HTTP_PATHS_TO_REWRITE } from './constants.ts'
+import type { HandlerInterface, HandlerOptions } from './types.ts'
 
-class HttpHandler {
+class HttpHandler implements HandlerInterface {
   private browserHost: string
   private browserPort: number
-  constructor(browserHost: string, browserPort: number) {
-    this.browserHost = browserHost
-    this.browserPort = browserPort
+
+  /**
+   * Creates a new HTTP handler for the CDP proxy
+   * @param options Configuration options for the handler
+   */
+  constructor(options: HandlerOptions) {
+    this.browserHost = options.browserHost
+    this.browserPort = options.browserPort
   }
 
   private async handleHttp(
