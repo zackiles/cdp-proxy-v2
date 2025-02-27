@@ -14,12 +14,12 @@ await chromium.install({
 console.log('installed')
 */
 import * as dotenv from '@std/dotenv'
+import type { EnvVars, HandlerOptions } from './types.ts'
 import { BrowserManager } from './browser-manager.ts'
 import { HttpHandler } from './http-handler.ts'
 import { WebSocketHandler } from './websocket-handler.ts'
 import { connectAndNavigate } from './browser-agent.ts'
 import { Config } from './config.ts'
-import type { EnvVars, HandlerOptions } from './types.ts'
 import { recordToObject } from './utils.ts'
 import { ShutdownManager } from './shutdown-manager.ts'
 import { createRouterHandler } from './router.ts'

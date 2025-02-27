@@ -1,5 +1,5 @@
 import type { HttpHandler } from './http-handler.ts'
-import { WebSocketHandler } from './websocket-handler.ts'
+import type { WebSocketHandler } from './websocket-handler.ts'
 import { CDP_WEBSOCKET_PATHS } from './constants.ts'
 
 let socketCount = 0

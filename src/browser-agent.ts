@@ -20,14 +20,14 @@ async function connectAndNavigate(
   browserWebSocketDebuggerUrl: string,
 ): Promise<void> {
   // Suppress specific warning about createConnection
-  //filterPlaywrightLogs.suppressCreateConnectionWarning()
+  filterPlaywrightLogs.suppressCreateConnectionWarning()
   console.debug(
     'Attempting to connect to browser through the proxy through Playwright client...',
   )
   // Connect to the existing browser instance using CDP
 
   const browser = await chromium.connectOverCDP(browserWebSocketDebuggerUrl, {
-    slowMo: 10000,
+    //slowMo: 10000,
     logger: {
       isEnabled: () => true,
       log: (name, severity, message, args) =>
@@ -55,16 +55,13 @@ async function connectAndNavigate(
   console.debug('Navigated to Google!')
   // Get the page title and verify it
   const pageTitle = await page.title()
-  console.debug('Got the page title!', { pageTitle })
+  console.debug('Success! Got the page title!', { pageTitle })
   if (!pageTitle.toLowerCase().includes('google')) {
     throw new Error(`Expected Google page title but got: ${pageTitle}`)
   }
 
-  await new Promise((resolve) => setTimeout(resolve, 30000))
-  //console.debug('Closing the context...')
-  // Clean up context only, let ShutdownManager handle browser cleanup
-  //await context.close()
-  // console.debug('Closed the context!')
+  await context.close()
+  console.debug('Test finished!Closed the context!')
 }
 
 export { connectAndNavigate }
