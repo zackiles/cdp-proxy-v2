@@ -3,39 +3,52 @@
   "version": "0.0.1",
   "exports": "./src/mod.ts",
   "tasks": {
-    "dev": "DEBUG=pw:api deno run --watch --allow-all ./src/main.ts",
-    "test": "DEBUG=pw:api deno test --allow-all test/**/*.test.ts"
+    "dev": "deno run --watch --allow-all ./src/main.ts",
+    "test": "deno test --allow-all test/**/*.test.ts",
+    // The end-to-end test needs a real browser; skip it for a fast inner loop.
+    "test:unit": "deno test --allow-all --ignore=test/smoke.test.ts test/**/*.test.ts",
+    "smoke": "deno test --allow-all test/smoke.test.ts"
   },
   "license": "MIT",
-  "description": "A powerful Chrome DevTools Protocol (CDP) proxy interceptor that enables modifying HTTP responses with advanced features like streaming JSON parsing, UTF-8 aware text chunking, and proper escape sequence handling.",
-  "runtime": {
-    "deno": ">=1.37",
-    "bun": ">=1.0",
-    "node": ">=18.0"
-  },
+  "description": "A stealthy, plugin-configurable Playwright wrapper. Fronts Chrome's DevTools Protocol on the wire so plugins can rewrite CDP traffic per session, while callers keep using stock Playwright objects.",
   "imports": {
-    "@browser-tools/browser-manager": "jsr:@browser-tools/browser-manager@^0.0.12",
+    "@browser-tools/browser-manager": "jsr:@browser-tools/browser-manager@0",
+    "@opentelemetry/api": "npm:@opentelemetry/api@1",
+    "@opentelemetry/api-logs": "npm:@opentelemetry/api-logs@0",
+    "@opentelemetry/sdk-logs": "npm:@opentelemetry/sdk-logs@0",
     "@std/assert": "jsr:@std/assert@1",
     "@std/async": "jsr:@std/async@1",
     "@std/cli": "jsr:@std/cli@1",
-    "@std/dotenv": "jsr:@std/dotenv@^0.225.3",
+    "@std/dotenv": "jsr:@std/dotenv@0",
     "@std/fs": "jsr:@std/fs@1",
     "@std/http": "jsr:@std/http@1",
-    "@std/io": "jsr:@std/io@^0.225.2",
-    "@std/jsonc": "jsr:@std/jsonc@^1.0.1",
+    "@std/io": "jsr:@std/io@1",
+    "@std/jsonc": "jsr:@std/jsonc@1",
     "@std/net": "jsr:@std/net@1",
     "@std/path": "jsr:@std/path@1",
-    "@zackiles/response-rewriter": "jsr:@zackiles/response-rewriter@^0.0.3",
+    "@zackiles/response-rewriter": "jsr:@zackiles/response-rewriter@0",
     "chrome-launcher": "npm:chrome-launcher@1",
     "playwright": "npm:playwright@1.50.1",
-    "devtools-protocol": "npm:devtools-protocol@^0.0.1422344"
+    "devtools-protocol": "npm:devtools-protocol@0"
   },
   "compilerOptions": {
     "strict": true,
-    "lib": ["deno.window", "deno.ns", "dom"]
+    "lib": [
+      "deno.window",
+      "deno.ns",
+      "dom"
+    ]
   },
   "fmt": {
-    "include": ["*.ts"],
+    "include": [
+      "src/",
+      "plugins/",
+      "test/",
+      "*.ts"
+    ],
+    "exclude": [
+      "scratch/"
+    ],
     "lineWidth": 80,
     "semiColons": false,
     "singleQuote": true

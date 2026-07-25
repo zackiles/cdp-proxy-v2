@@ -7,7 +7,7 @@ yarn-error.log*
 lerna-debug.log*
 .pnpm-debug.log*
 bun.lock
-deno.lock
+
 
 .chrome
 
@@ -137,3 +137,8 @@ dist
 
 # Deno
 .deno
+
+# Captured output from the throwaway probes in scratch/ (the probes themselves are
+# kept: docs/stealth.md cites them as the reproductions for browser behaviour).
+scratch/*.out
+scratch/*.log

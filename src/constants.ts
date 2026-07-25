@@ -56,22 +56,26 @@ const CDP_WEBSOCKET_PATHS = [
  * @see {@link browser-manager.ts#simulateFinalLaunchFlags} for launch flag simulation
  */
 const BROWSER_LAUNCH_FLAGS = [
-  '--headless=new', // Run browser in headless mode using new implementation
   '--no-default-browser-check', // Skip default browser check
   '--no-first-run', // Skip first run wizards
   '--disable-gpu', // Disable GPU hardware acceleration
   '--disable-accelerated-video-decode', // Disable hardware video decode acceleration
   '--no-sandbox', // Disable sandbox security feature
-  '--enable-logging', // Enable browser process logging
   '--enable-features=NetworkService,NetworkServiceInProcess', // Enable required network features
   '--allow-pre-commit-input', // Allow input before commit
   '--disable-background-networking', // Disable background network tasks
   '--disable-default-apps', // Disable installation of default apps
   '--disable-extensions', // Disable browser extensions
   '--disable-sync', // Disable browser sync features
-  '--enable-automation', // Enable automation-specific features
   '--password-store=basic', // Use basic password store
 ] as const
+
+// DANGER: --enable-automation is intentionally omitted. It sets
+// navigator.webdriver=true and shows the automation infobar, both of which are
+// stealth tells that defeat the product's core purpose.
+
+/** Appended only when running headless; kept conditional per §0.1.3 / §9. */
+const HEADLESS_FLAG = '--headless=new'
 
 type ProxyLogLevel =
   | 'silent'
@@ -112,10 +116,11 @@ const PROXY_TO_LAUNCHER_LOG_LEVEL: Record<ProxyLogLevel, LauncherLogLevel> = {
 } as const
 
 export {
-  CDP_HTTP_PATHS,
-  CDP_WEBSOCKET_PATHS,
   BROWSER_LAUNCH_FLAGS,
+  CDP_HTTP_PATHS,
+  CDP_HTTP_PATHS_TO_REWRITE,
+  CDP_WEBSOCKET_PATHS,
+  HEADLESS_FLAG,
   PROXY_TO_CDP_LOG_LEVEL,
   PROXY_TO_LAUNCHER_LOG_LEVEL,
-  CDP_HTTP_PATHS_TO_REWRITE,
 }

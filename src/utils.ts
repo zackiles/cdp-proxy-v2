@@ -1,4 +1,12 @@
 /**
+ * Coerce an unknown `catch` binding into an `Error`, so callers can log a real
+ * stack instead of a stringified value.
+ */
+export function asError(cause: unknown): Error {
+  return cause instanceof Error ? cause : new Error(String(cause))
+}
+
+/**
  * Monitors a process ID and resolves when either the process exits or timeout is reached
  * @param {number} pid - Process ID to monitor
  * @param {number} timeout - Maximum wait time in milliseconds
@@ -50,8 +58,7 @@ async function killProcessOnPortByName(
   const MAX_BACKOFF_MS = 500
   const PROCESS_EXIT_TIMEOUT_MS = 5000
 
-  const isWSL =
-    Deno.build.os === 'linux' &&
+  const isWSL = Deno.build.os === 'linux' &&
     (await Deno.readTextFile('/proc/version').catch(() => '')).includes(
       'Microsoft',
     )
@@ -119,8 +126,9 @@ async function killProcessOnPortByName(
         }
       }
     } catch (error: unknown) {
-      const errorMessage =
-        error instanceof Error ? error.message : String(error)
+      const errorMessage = error instanceof Error
+        ? error.message
+        : String(error)
       throw new Error(
         `Failed to get PIDs for port ${PORT_STR}: ${errorMessage}`,
       )
@@ -129,10 +137,7 @@ async function killProcessOnPortByName(
 
   try {
     const pids = await getPids()
-    if (!pids.length) {
-      console.debug(`No processes found on port ${PORT_STR}`)
-      return // Early return for no processes
-    }
+    if (!pids.length) return // Nothing is holding the port; the common case.
 
     if (Deno.build.os === 'windows' && !isWSL) {
       try {
@@ -168,8 +173,9 @@ async function killProcessOnPortByName(
             cmd: 'taskkill',
             args: ['/F', '/T', '/PID', ...batch],
           }).catch((error: unknown) => {
-            const errorMessage =
-              error instanceof Error ? error.message : String(error)
+            const errorMessage = error instanceof Error
+              ? error.message
+              : String(error)
             console.error('Process kill failed', {
               batchIndex: i,
               error: errorMessage,
@@ -195,8 +201,9 @@ async function killProcessOnPortByName(
           })
         }
       } catch (error: unknown) {
-        const errorMessage =
-          error instanceof Error ? error.message : String(error)
+        const errorMessage = error instanceof Error
+          ? error.message
+          : String(error)
         console.error(`Windows process termination failed: ${errorMessage}`)
       }
     } else {
@@ -223,7 +230,9 @@ async function killProcessOnPortByName(
           const cmdline = pidToCmdline[pid]
           if (!cmdline || !pattern.test(cmdline)) continue
 
-          const killProcess = async () => {
+          // False once the process is gone, which is how the retry loop below
+          // learns to stop.
+          const killProcess = (): boolean => {
             try {
               Deno.kill(Number(pid), 'SIGKILL')
             } catch {
@@ -232,12 +241,11 @@ async function killProcessOnPortByName(
             return true
           }
 
-          // Initial kill attempt
-          await killProcess()
+          killProcess()
 
           // Retry with exponential backoff if needed
           for (let retryCount = 0; retryCount < MAX_RETRY_COUNT; retryCount++) {
-            if (await killProcess()) {
+            if (killProcess()) {
               try {
                 await waitForProcessExit(Number(pid), PROCESS_EXIT_TIMEOUT_MS)
               } catch {
@@ -266,13 +274,14 @@ async function killProcessOnPortByName(
               setTimeout(
                 resolve,
                 Math.min(MAX_BACKOFF_MS, 2 ** retryCount * 10),
-              ),
+              )
             )
           }
         }
       } catch (error: unknown) {
-        const errorMessage =
-          error instanceof Error ? error.message : String(error)
+        const errorMessage = error instanceof Error
+          ? error.message
+          : String(error)
         console.error(`Unix process termination failed: ${errorMessage}`)
       }
     }
@@ -332,4 +341,4 @@ function recordToObject(
   )
 }
 
-export { waitForProcessExit, killProcessOnPortByName, recordToObject }
+export { killProcessOnPortByName, recordToObject, waitForProcessExit }

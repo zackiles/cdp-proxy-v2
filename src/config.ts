@@ -1,4 +1,5 @@
 import { getAvailablePort } from '@std/net'
+import * as dotenv from '@std/dotenv'
 import type { EnvVars } from './types.ts'
 import {
   PROXY_TO_CDP_LOG_LEVEL,
@@ -16,6 +17,16 @@ export type ConfigOptions = {
   browserDirectory: string
   browserVersion: string
   browserExecutablePath: string
+  /** A preconfigured/remote CDP endpoint to front instead of launching locally. */
+  browserWsEndpoint: string
+  /** Launch the managed browser headless (cloud default) or headful (local debug). */
+  headless: boolean
+  /** Default isolation granularity for sessions. */
+  isolation: 'context' | 'browser'
+  /** Directory of plugins to expose by name over the control endpoint; '' disables. */
+  pluginsDirectory: string
+  /** Plugin trace filter, e.g. `1`, `stealth`, `stealth:Runtime.*`; '' disables. */
+  debug: string
   proxyLogLevel:
     | 'silent'
     | 'error'
@@ -27,6 +38,54 @@ export type ConfigOptions = {
   proxyLogTags: string
   launcherLogLevel: ChromeLauncherLogLevel
   cdpLogLevelFlag: string
+}
+
+/** Relative paths to the browser binary inside a Playwright `chromium-*` build. */
+const BROWSER_BINARIES = [
+  'chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
+  'chrome-mac/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
+  'chrome-linux/chrome',
+  'chrome-win/chrome.exe',
+]
+
+/**
+ * Find the newest "Chrome for Testing" from Playwright's browser cache.
+ *
+ * DANGER: do not default to `/Applications/Google Chrome.app` on managed macOS
+ * fleets. It inherits `com.google.Chrome` managed preferences, and fresh-profile
+ * policy provisioning (forced extension installs) makes the browser detach every
+ * page target a few seconds after launch, killing automation mid-run. Chrome for
+ * Testing ships a different bundle id, so those policies never apply to it.
+ */
+async function findBrowser(): Promise<string> {
+  const home = Deno.env.get('HOME') ?? Deno.env.get('USERPROFILE')
+  if (!home) return ''
+
+  const builds: { build: number; dir: string }[] = []
+  for (
+    const root of [
+      `${home}/Library/Caches/ms-playwright`,
+      `${home}/.cache/ms-playwright`,
+      `${home}/AppData/Local/ms-playwright`,
+    ]
+  ) {
+    try {
+      for await (const entry of Deno.readDir(root)) {
+        const build = Number(entry.name.match(/^chromium-(\d+)$/)?.[1])
+        if (build) builds.push({ build, dir: `${root}/${entry.name}` })
+      }
+    } catch { /* cache root absent on this platform */ }
+  }
+
+  for (const { dir } of builds.sort((a, b) => b.build - a.build)) {
+    for (const binary of BROWSER_BINARIES) {
+      const path = `${dir}/${binary}`
+      try {
+        if ((await Deno.stat(path)).isFile) return path
+      } catch { /* try the next layout */ }
+    }
+  }
+  return ''
 }
 
 class Config {
@@ -47,6 +106,11 @@ class Config {
     } else {
       throw new Error('Global Config instance is already set')
     }
+  }
+
+  /** Whether a global instance exists, so callers need not catch to find out. */
+  static get hasGlobal(): boolean {
+    return Config._instance !== null
   }
 
   /**
@@ -89,6 +153,16 @@ class Config {
     Object.assign(this.options, newOptions)
   }
 
+  /**
+   * Environment for {@link Config.create}: `.env` supplies defaults and the real
+   * process environment overrides them, so containers and CI can configure the
+   * proxy without editing a file.
+   */
+  static async env(): Promise<EnvVars> {
+    const file = await dotenv.load({ export: false }).catch(() => ({}))
+    return { ...file, ...Deno.env.toObject() } as EnvVars
+  }
+
   static async create(env: EnvVars = {}): Promise<ConfigOptions> {
     const proxyLogLevel =
       (env.CDP_PROXY_LOG_LEVEL as ConfigOptions['proxyLogLevel']) || 'verbose'
@@ -100,14 +174,23 @@ class Config {
       browserHost: env.CDP_BROWSER_HOST || 'localhost',
       browserDirectory: env.CDP_BROWSER_DIRECTORY || '.cache',
       browserVersion: env.CDP_BROWSER_VERSION || '',
-      browserExecutablePath: env.CDP_BROWSER_EXECUTABLE_PATH || '',
+      browserExecutablePath: env.CDP_BROWSER_EXECUTABLE_PATH ||
+        (await findBrowser()),
+      browserWsEndpoint: env.CDP_BROWSER_WS_ENDPOINT || '',
+      headless: String(env.CDP_HEADLESS ?? 'true') !== 'false',
+      isolation: String(env.CDP_ISOLATION) === 'browser'
+        ? 'browser'
+        : 'context',
+      // Off unless asked for: importing arbitrary files is the standalone
+      // server's job, not something an embedded SDK should do behind your back.
+      pluginsDirectory: env.CDP_PLUGINS_DIRECTORY || '',
+      debug: env.CDP_DEBUG || '',
       proxyLogLevel,
       proxyLogTags: env.CDP_PROXY_LOG_TAGS || '',
       // Derived values that don't come from env
       launcherLogLevel:
         PROXY_TO_LAUNCHER_LOG_LEVEL[proxyLogLevel as LogLevelName] || 'verbose',
-      cdpLogLevelFlag:
-        PROXY_TO_CDP_LOG_LEVEL[proxyLogLevel as LogLevelName] ||
+      cdpLogLevelFlag: PROXY_TO_CDP_LOG_LEVEL[proxyLogLevel as LogLevelName] ||
         PROXY_TO_CDP_LOG_LEVEL.verbose,
     }
   }

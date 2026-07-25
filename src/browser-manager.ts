@@ -2,10 +2,15 @@
  * Manages a Browser instance for CDP (Chrome DevTools Protocol) connections.
  * Handles browser lifecycle including launch, connection, and graceful shutdown.
  */
-import { launch, Launcher, type LaunchedChrome } from 'chrome-launcher'
-import { BROWSER_LAUNCH_FLAGS } from './constants.ts'
-import { waitForProcessExit, killProcessOnPortByName } from './utils.ts'
+import { launch, type LaunchedChrome, Launcher } from 'chrome-launcher'
+import { BROWSER_LAUNCH_FLAGS, HEADLESS_FLAG } from './constants.ts'
+import {
+  asError,
+  killProcessOnPortByName,
+  waitForProcessExit,
+} from './utils.ts'
 import { Config } from './config.ts'
+import { Logger } from './logger.ts'
 
 interface LaunchedBrowser extends LaunchedChrome {
   browserWebSocketDebuggerUrl?: string
@@ -38,18 +43,14 @@ class BrowserManager {
    * @throws {Error} If browser fails to launch or CDP connection fails
    */
   async start(): Promise<void> {
-    console.debug(
-      `Ensuring a browser is not already running on port ${this.browserPort}...`,
-    )
-
+    const log = Logger.get('browser')
     await killProcessOnPortByName(this.browserPort, /brave|chrome|edge/i)
 
-    console.debug('Starting browser...', {
+    log.debug('starting browser', {
       browserHost: this.browserHost,
       browserPort: this.browserPort,
       browserExecutablePath: this.browserExecutablePath,
       browserLaunchFlags: this.simulateFinalLaunchFlags(),
-      logLevel: Config.get('proxyLogLevel'),
     })
 
     try {
@@ -58,37 +59,29 @@ class BrowserManager {
         port: Number(this.browserPort),
         userDataDir: false,
         logLevel: Config.get('launcherLogLevel'),
-        maxConnectionRetries: 2,
+        // Chrome can take several seconds to open the CDP port on macOS; a tiny
+        // retry budget was the "finicky startup" race. 50 * 500ms = ~25s.
+        maxConnectionRetries: 50,
         connectionPollInterval: 500,
         startingUrl: undefined,
         chromeFlags: [
           ...BROWSER_LAUNCH_FLAGS,
+          ...(Config.get('headless') ? [HEADLESS_FLAG] : []),
           Config.get('cdpLogLevelFlag'),
           `--remote-debugging-port=${this.browserPort}`,
           `--remote-debugging-address=${this.browserHost}`,
           '--disable-gcm',
-          '--disable-sync',
-          '--disable-background-networking',
-          '--disable-default-apps',
           '--disable-component-update',
-          '--disable-web-security',
-          '--allow-running-insecure-content',
-          '--ignore-certificate-errors',
         ],
         handleSIGINT: false, // The proxy handles it's own SIGINT that cleans up the browser instance
       })
 
-      this.browser.browserWebSocketDebuggerUrl =
-        await this.#getCDPWebSocketUrl()
-      console.log(
-        'Browser started at',
-        this.browser.browserWebSocketDebuggerUrl,
-      )
-    } catch (error) {
-      console.error('Browser failed to launch', {
-        message: error instanceof Error ? error.message : 'Unknown error',
-        stack: error instanceof Error ? error.stack : undefined,
-      })
+      this.browser.browserWebSocketDebuggerUrl = await this
+        .#getCDPWebSocketUrl()
+      log.info(`browser started at ${this.browser.browserWebSocketDebuggerUrl}`)
+    } catch (cause) {
+      const error = asError(cause)
+      log.error('browser failed to launch', { error })
       throw error
     }
   }
@@ -138,6 +131,7 @@ class BrowserManager {
 
     // User supplied flags to the proxy config
     finalFlags.push(...BROWSER_LAUNCH_FLAGS)
+    if (Config.get('headless')) finalFlags.push(HEADLESS_FLAG)
 
     // Odds and ends
     const extraFlags = [
@@ -162,7 +156,8 @@ class BrowserManager {
    * @throws {Error} If CDP endpoint is unreachable or returns invalid data
    */
   async #getCDPWebSocketUrl(timeout = 5000): Promise<string> {
-    const endpoint = `http://${this.browserHost}:${this.browserPort}/json/version`
+    const endpoint =
+      `http://${this.browserHost}:${this.browserPort}/json/version`
     const controller = new AbortController()
     const timeoutId = setTimeout(() => controller.abort(), timeout)
 
@@ -180,11 +175,14 @@ class BrowserManager {
       }
 
       return webSocketDebuggerUrl
-    } catch (error: unknown) {
+    } catch (cause: unknown) {
       clearTimeout(timeoutId)
-      const message = error instanceof Error ? error.message : String(error)
-      console.error(`CDP connection failed: ${message}`)
-      throw new Error(`Failed to connect to browser at ${endpoint}: ${message}`)
+      throw new Error(
+        `Failed to connect to browser at ${endpoint}: ${
+          asError(cause).message
+        }`,
+        { cause },
+      )
     }
   }
 }

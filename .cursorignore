@@ -5,8 +5,8 @@
 
 # Prefer to manually provide documentation and settings to Cursor to avoid context pollution
 # CAUTION: you might actually need these, but can specify them manually using the @ symbol in chats if needed.
-*.md
-docs/
+#*.md
+#docs/
 *.json
 *.jsonc
 *.log
