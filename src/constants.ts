@@ -58,8 +58,13 @@ const CDP_WEBSOCKET_PATHS = [
 const BROWSER_LAUNCH_FLAGS = [
   '--no-default-browser-check', // Skip default browser check
   '--no-first-run', // Skip first run wizards
-  '--disable-gpu', // Disable GPU hardware acceleration
-  '--disable-accelerated-video-decode', // Disable hardware video decode acceleration
+  // DANGER: do not add --disable-gpu. It leaves the page with no WebGL context at
+  // all, and every real Chrome has one — checking `!!canvas.getContext('webgl')`
+  // is a one-line headless test. ANGLE over SwiftShader gives a working context
+  // without needing a GPU, so it holds up in a container too, and the unsafe flag
+  // is what lifts Chrome's own block on software WebGL.
+  '--use-gl=angle',
+  '--enable-unsafe-swiftshader',
   '--no-sandbox', // Disable sandbox security feature
   '--enable-features=NetworkService,NetworkServiceInProcess', // Enable required network features
   '--allow-pre-commit-input', // Allow input before commit

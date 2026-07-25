@@ -58,6 +58,13 @@ export interface CDPResponse {
   result?: Record<string, unknown>
   error?: CDPError
   sessionId?: SessionId
+  /**
+   * The command this answers. A reply carries no method on the wire, so the proxy
+   * fills it in for `onResponse` — otherwise every plugin that cares about replies
+   * has to keep its own id-to-method map — and strips it again before the client
+   * sees the message. It is also what `match` filters `onResponse` on.
+   */
+  method?: string
 }
 
 export interface CDPEvent {
@@ -92,6 +99,23 @@ type CommandParams<M extends keyof Commands> = Commands[M]['paramsType'][0]
 /** Return type for a typed CDP command. */
 type CommandReturn<M extends keyof Commands> = Commands[M]['returnType']
 
+export interface InjectOptions {
+  /**
+   * Run in a named isolated world rather than the page's own. Chrome creates the
+   * world for each document, and the page can neither see nor reach anything the
+   * script defines there — the only way to run plugin code on a page without
+   * leaving something behind for it to find.
+   *
+   * Reading a result back out means evaluating in the same world, which
+   * `Page.createIsolatedWorld({ frameId, worldName })` returns the context id for.
+   * A `Runtime.addBinding` callback channel is not an option: see {@link
+   * PluginContext.inject}.
+   */
+  world?: string
+  /** Also run once in the document already loaded, not just the next one. */
+  immediately?: boolean
+}
+
 /**
  * Per-invocation context handed to every plugin hook. Replaces v1's injected
  * `sendCommand` + hand-rolled session maps with a rich, typed surface.
@@ -122,14 +146,48 @@ export interface PluginContext {
     params: Events[M] extends [infer P] ? P : Record<string, never>,
     sessionId?: SessionId,
   ): void
+  /**
+   * Run `source` at the start of every document in a target, its subframes
+   * included, and return a function that stops future documents from getting it.
+   * Documents that already ran it keep whatever it did.
+   *
+   * Pass `world` to run in an isolated world, invisible to the page.
+   *
+   * IMPORTANT: there is deliberately no `bind` companion for calling back *out*
+   * of injected code. `Runtime.addBinding` installs its function into the
+   * contexts that exist when it is sent and is gone after the next navigation
+   * unless `Runtime.enable` is on, and scoping it to a world needs
+   * `Runtime.enable` too — so a binding channel is either quietly broken or
+   * announces the session. Read results back with `Runtime.evaluate` instead.
+   */
+  inject(
+    source: string,
+    sessionId: SessionId,
+    options?: InjectOptions,
+  ): Promise<() => Promise<void>>
+  /**
+   * Scratch space for one target, created on first use and dropped when the
+   * target detaches. Plugins outlive the pages they configure, so anything keyed
+   * by session id in plugin scope has to be pruned by hand on detach, and
+   * forgetting is a leak that only shows on long-lived connections. Each plugin
+   * sees its own.
+   */
+  state<T>(sessionId: SessionId, init: () => T): T
   /** Per-plugin scoped logger. */
   log(...args: unknown[]): void
 }
 
-/** Result of an `onRequest` hook. */
+/**
+ * Result of an `onRequest` hook.
+ *
+ * Note that `null` *refuses* the command rather than discarding it: every CDP
+ * command has a client waiting on its id, so a silent drop would hang the client
+ * until its own timeout. Use `{ respond }` to suppress a command while keeping the
+ * client happy — that is what a plugin hiding a command almost always wants.
+ */
 export type RequestOutcome =
   | CDPRequest // forward (possibly modified)
-  | null // drop silently
+  | null // refuse: the client gets an error naming the plugin
   | { respond: Record<string, unknown> | { error: CDPError } } // short-circuit
   | void // unmodified forward
 
@@ -166,6 +224,13 @@ export interface PluginDefinition<Options> {
   match?: string[]
   /** Higher runs earlier when multiple plugins touch the same message. */
   priority?: number
+  /**
+   * Let the session continue without this plugin if `setup` throws. Off by
+   * default: a plugin that never installed is a silent lie about how the session
+   * is configured, and a caller who asked for stealth should not be handed a
+   * plain browser. Set it for plugins that only observe, like a recorder.
+   */
+  optional?: boolean
   setup(cfg: Options, ctx: PluginContext): PluginHooks | Promise<PluginHooks>
 }
 
@@ -180,6 +245,7 @@ export interface ConfiguredPlugin {
   matches(method: string): boolean
   /** The globs `matches` was compiled from, retained so traces can show them. */
   match?: string[]
+  optional?: boolean
   setup(ctx: PluginContext): PluginHooks | Promise<PluginHooks>
 }
 

@@ -223,6 +223,103 @@ Deno.test({
         },
       )
 
+      await t.step('the page sits in a plausible browser window', async () => {
+        const page = await stealthy!.newPage()
+        await page.goto(origin, { waitUntil: 'domcontentloaded' })
+
+        const shape = await page.evaluate(() => ({
+          screenWidth: screen.width,
+          innerWidth: globalThis.innerWidth,
+          chrome: globalThis.outerHeight - globalThis.innerHeight,
+          webgl: !!document.createElement('canvas').getContext('webgl'),
+          languages: navigator.languages.length,
+        }))
+
+        // Headless pins the screen to the viewport and gives the window no tab
+        // strip or toolbar, so both comparisons come out equal on a stock browser.
+        assert(
+          shape.screenWidth > shape.innerWidth,
+          `screen ${shape.screenWidth} must exceed the viewport ${shape.innerWidth}`,
+        )
+        assert(shape.chrome > 0, 'a real window is taller than its viewport')
+        // Every real Chrome has a WebGL context; --disable-gpu leaves none at all.
+        assert(shape.webgl, 'WebGL must be available')
+        assert(shape.languages > 1, 'Chrome sends a list, not one language')
+      })
+
+      await t.step(
+        'stealth leaves nothing of its own in the page',
+        async () => {
+          const page = await stealthy!.newPage()
+          const own = () =>
+            page.evaluate(() =>
+              Object.getOwnPropertyNames(globalThis).filter((k) =>
+                k.startsWith('__')
+              )
+            )
+
+          // Deriving a context used to cost a `Runtime.addBinding`, and
+          // `Runtime.removeBinding` does not take the installed function back off
+          // `window` — every document kept a uniquely named global, which is a
+          // louder tell than the one this plugin removes.
+          await page.goto(origin, { waitUntil: 'domcontentloaded' })
+          assertEquals(await own(), [], 'a fresh document is untouched')
+
+          await page.goto(`${origin}/second`, { waitUntil: 'domcontentloaded' })
+          assertEquals(await own(), [], 'and stays untouched across navigation')
+        },
+      )
+
+      await t.step('a plugin can run code the page cannot see', async () => {
+        // The one stealth-safe way for a plugin to run page-side code: an
+        // isolated world, which the page can neither read nor reach. A
+        // `Runtime.addBinding` channel is not an alternative — without
+        // `Runtime.enable` the binding is gone after the next navigation, and
+        // scoping it to this world needs `Runtime.enable` as well.
+        const world = definePlugin({
+          name: 'private-world',
+          setup: (_cfg, ctx) => ({
+            onTargetAttached: async (target) => {
+              if (target.type !== 'page') return
+              await ctx.inject(
+                `self.secret = 'plugin'
+                 const mark = () =>
+                   document.documentElement
+                     ? document.documentElement.setAttribute('data-ran', '1')
+                     : setTimeout(mark, 1)
+                 mark()`,
+                target.sessionId,
+                { world: 'plugin_world' },
+              )
+            },
+          }),
+        })()
+
+        const browser = await chromium.launch({
+          plugins: [stealth(), world],
+        })
+        try {
+          const page = await browser.newPage()
+          await page.goto(`${origin}/second`, { waitUntil: 'load' })
+
+          // Every world shares one DOM, so the mark is proof the script ran.
+          assertEquals(await page.getAttribute('html', 'data-ran'), '1')
+          // Nothing it defined is reachable from the page's own world, and no
+          // global of ours appeared there either.
+          assertEquals(await page.evaluate(() => 'secret' in globalThis), false)
+          assertEquals(
+            await page.evaluate(() =>
+              Object.getOwnPropertyNames(globalThis).filter((k) =>
+                k.startsWith('__')
+              )
+            ),
+            [],
+          )
+        } finally {
+          await browser.close().catch(() => {})
+        }
+      })
+
       await t.step(
         'contexts survive navigation to a new document',
         async () => {
@@ -422,20 +519,15 @@ Deno.test({
                 'concurrent stealth session rewrote its User-Agent',
             )
 
-            // The User-Agent alone is too soft a tell: navigator.webdriver is
-            // already false here (--enable-automation is omitted), so the sharpest
-            // evidence of a neighbour is the binding stealth injects to derive the
-            // main world. Its presence means foreign setup reached this page.
-            const injected = await mine.evaluate(() =>
-              Object.getOwnPropertyNames(self).filter((k) =>
-                /^__pw_[0-9a-f]{12}$/.test(k)
-              )
-            )
+            // The User-Agent is not the only thing stealth's per-page setup
+            // changes, and one tell could always come from somewhere else.
+            // `Emulation.setUserAgentOverride` carries the Accept-Language too,
+            // so an untouched page still reports Chrome's own single entry.
             assertEquals(
-              injected,
-              [],
-              'a plugins:[] session must have no injected bindings, but the ' +
-                'concurrent stealth session installed some',
+              await mine.evaluate(() => navigator.languages.length),
+              1,
+              'a plugins:[] session must be an untouched browser, but the ' +
+                'concurrent stealth session set its Accept-Language',
             )
 
             // ...while stealth still does its job on the pages that are its own.

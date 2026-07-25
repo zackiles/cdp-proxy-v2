@@ -17,10 +17,13 @@ import {
 } from 'playwright'
 import { Config } from './config.ts'
 import { Proxy } from './proxy.ts'
+import { Logger } from './logger.ts'
 import type { Debug } from './debug.ts'
 import { stealth } from '../plugins/stealth.ts'
 import { PROXY_METHOD_PREFIX, SESSION_TOKEN_HEADER } from './types.ts'
 import type { ConfiguredPlugin, IsolationMode } from './types.ts'
+
+const log = Logger.get('sdk')
 
 export interface LaunchOptions {
   /** Headless (cloud default) or headful for local debugging. */
@@ -36,9 +39,10 @@ export interface LaunchOptions {
   /** Playwright slow-motion (ms) for headful debugging. */
   slowMo?: number
   /**
-   * Trace what plugins do with each message. `true` traces everything; a string
-   * filters by `source[:methodGlob]`, where source is a plugin name or `proxy`
-   * for the transport — e.g. `'myplugin:Runtime.*'`. Same syntax as `CDP_DEBUG`.
+   * Trace what plugins do with each message, for this session only. `true` traces
+   * everything; a string filters by `source[:methodGlob]`, where source is a plugin
+   * name or `proxy` for the transport — e.g. `'myplugin:Runtime.*'`. Same syntax as
+   * `CDP_DEBUG`, which supplies the default.
    */
   debug?: boolean | string
 }
@@ -53,9 +57,11 @@ export interface Session {
 
 let sharedProxy: Proxy | undefined
 let starting: Promise<Proxy> | undefined
+/** The mode the pool's browsers were actually launched in, for conflict warnings. */
+let launched: boolean | undefined
 
 async function ensureConfig(
-  overrides?: Partial<{ headless: boolean; debug: string }>,
+  overrides?: Partial<{ headless: boolean }>,
 ): Promise<void> {
   if (!Config.hasGlobal) {
     Config.setGlobal(new Config(await Config.create(await Config.env())))
@@ -69,6 +75,7 @@ function ensureProxy(): Promise<Proxy> {
   starting = (async () => {
     const proxy = new Proxy({ handleSignals: false })
     await proxy.start()
+    launched = Config.get('headless')
     sharedProxy = proxy
     return proxy
   })()
@@ -76,17 +83,33 @@ function ensureProxy(): Promise<Proxy> {
 }
 
 async function connect(opts: LaunchOptions): Promise<Browser> {
-  await ensureConfig({
-    headless: opts.headless ?? true,
-    // Leave the env-provided filter alone unless the caller asked for one.
-    ...(opts.debug === undefined
-      ? {}
-      : { debug: opts.debug === true ? '*' : opts.debug || '' }),
-  })
+  const headless = opts.headless ?? true
+  await ensureConfig({ headless })
   const proxy = await ensureProxy()
+
+  // The pool launched its browsers when the proxy started, so a later change of
+  // mind cannot reach them. A browser-isolated session gets a process of its own
+  // and does honour it.
+  if (
+    launched !== undefined && launched !== headless &&
+    opts.isolation !== 'browser'
+  ) {
+    log.warn(
+      `headless: ${headless} was ignored — this process already launched its ` +
+        `browsers with headless: ${launched}. Pass isolation: 'browser' for a ` +
+        'session that needs its own mode, or launch it from its own process.',
+    )
+  }
+
   const token = await proxy.register(
     opts.plugins ?? [stealth()],
     opts.isolation,
+    // Leave the env-provided filter alone unless the caller asked for one.
+    opts.debug === undefined
+      ? undefined
+      : opts.debug === true
+      ? '*'
+      : opts.debug || '',
   )
   return await pwChromium.connectOverCDP(proxy.endpoint, {
     headers: { [SESSION_TOKEN_HEADER]: token },
@@ -178,5 +201,6 @@ export async function shutdown(): Promise<void> {
     await sharedProxy.stop()
     sharedProxy = undefined
     starting = undefined
+    launched = undefined
   }
 }

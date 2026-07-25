@@ -19,15 +19,16 @@ objects, so every Playwright method, type, and tool works unchanged.
 ## Why it exists
 
 To learn a page's JavaScript execution contexts, Playwright must call
-`Runtime.enable`. That one call makes Chrome report console activity and serialize
-console arguments — the long-standing fingerprint for "a DevTools client is
-attached". It is what most bot detectors actually look for.
+`Runtime.enable`. That one call makes Chrome report console activity and
+serialize console arguments — the long-standing fingerprint for "a DevTools
+client is attached". It is what most bot detectors actually look for.
 
-Other projects fix this by forking or patching Playwright's source, which you then
-have to maintain across every release. This project fixes it one layer lower. It
-sits between your client and Chrome as a CDP proxy, answers `Runtime.enable`
-itself, and hands Playwright the context ids it would have learned — so the
-command never reaches the browser and there is nothing to patch.
+Other projects fix this by forking or patching Playwright's source, which you
+then have to maintain across every release. This project fixes it one layer
+lower. It sits between your client and Chrome as a CDP proxy, answers
+`Runtime.enable` itself, and hands Playwright the context ids it would have
+learned — so the command never reaches the browser and there is nothing to
+patch.
 
 Working at the protocol layer generalizes: **anything** that speaks CDP can be
 intercepted, rewritten, dropped, or answered by a plugin, without forking a
@@ -36,7 +37,8 @@ client. Stealth is just the first plugin.
 ## Getting started
 
 You need [Deno](https://deno.com) 2.7+ and a Chromium binary. The easiest source
-of one is Playwright's own browser cache, which this project finds automatically:
+of one is Playwright's own browser cache, which this project finds
+automatically:
 
 ```sh
 npx playwright install chromium
@@ -55,9 +57,9 @@ and gives you a plain pass-through proxy:
 ```ts
 import { chromium, recorder, stealth } from './src/mod.ts'
 
-await chromium.launch()                                  // stealth
+await chromium.launch() // stealth
 await chromium.launch({ plugins: [stealth(), recorder()] }) // stealth + your own
-await chromium.launch({ plugins: [] })                   // stock Playwright
+await chromium.launch({ plugins: [] }) // stock Playwright
 ```
 
 **Debug locally, run headless in production**, from the same code:
@@ -65,6 +67,12 @@ await chromium.launch({ plugins: [] })                   // stock Playwright
 ```ts
 const browser = await chromium.launch({ headless: false, slowMo: 250 })
 ```
+
+One caveat: the browsers are launched when the first `launch()` in a process
+starts the proxy, so a later launch cannot change their mode. Asking for a
+different one logs a warning rather than quietly handing back the wrong kind of
+browser — pass `isolation: 'browser'` for a session that needs its own mode,
+since that gets a process of its own.
 
 **Drive many sites at once.** Every launch is an isolated session with its own
 cookies, storage, and plugin state, so concurrent sites cannot contaminate or
@@ -80,33 +88,34 @@ await Promise.all(urls.map(async (url) => {
 }))
 ```
 
-By default each session gets its own browser *context* — cheap, fast, and enough
-to separate storage and cookies, and a session's plugins only ever see the targets
-that session opened. When sites must not be correlatable at all, ask for a whole
-browser process per session, with its own profile, cache, and process-level
-fingerprint:
+By default each session gets its own browser _context_ — cheap, fast, and enough
+to separate storage and cookies, and a session's plugins only ever see the
+targets that session opened. When sites must not be correlatable at all, ask for
+a whole browser process per session, with its own profile, cache, and
+process-level fingerprint:
 
 ```ts
 const browser = await chromium.launch({ isolation: 'browser' })
 ```
 
-The one thing context isolation still shares is the browser's own default context,
-which every CDP client sees when it connects. Pages you open yourself never land
-there, but `browser.contexts()[0]` is common ground; use `isolation: 'browser'` if
-even that is too much.
+The one thing context isolation still shares is the browser's own default
+context, which every CDP client sees when it connects. Pages you open yourself
+never land there, but `browser.contexts()[0]` is common ground; use
+`isolation: 'browser'` if even that is too much.
 
 ## Bundled plugins
 
-**`stealth()`** is the flagship. It suppresses the `Runtime.enable` tell, supplies
-synthetic execution contexts for every frame including subframes, spoofs the
-User-Agent to drop the `HeadlessChrome` marker (keeping the platform metadata
-consistent with it), and scrubs `navigator.webdriver`. `page.evaluate`,
+**`stealth()`** is the flagship. It suppresses the `Runtime.enable` tell,
+supplies synthetic execution contexts for every frame including subframes,
+spoofs the User-Agent to drop the `HeadlessChrome` marker (keeping the platform
+metadata consistent with it), and scrubs `navigator.webdriver`. `page.evaluate`,
 `setContent`, selectors, iframes, and workers all keep working.
 [docs/stealth.md](docs/stealth.md) has the measurements behind each decision.
 
-The smoke test grades the result against [browserscan.net](https://www.browserscan.net/bot-detection):
-the same browser is reported as `Robot` with no plugins and `Normal` with
-`stealth()`, so the check cannot quietly pass if the spoofing regresses.
+The smoke test grades the result against
+[browserscan.net](https://www.browserscan.net/bot-detection): the same browser
+is reported as `Robot` with no plugins and `Normal` with `stealth()`, so the
+check cannot quietly pass if the spoofing regresses.
 
 **`recorder()`** records a session's CDP traffic and serves it back, which is
 useful both for debugging and as a compact example to copy:
@@ -122,8 +131,13 @@ const { entries } = await proxy.send<{ entries: Entry[] }>('Proxy.history')
 ## Writing a plugin
 
 A plugin is a typed factory. `setup` runs once per session and returns hooks;
-state lives in the closure, so each session gets its own isolated instance and no
-plugin can leak state into another site's session.
+state lives in the closure, so each session gets its own isolated instance and
+no plugin can leak state into another site's session.
+
+This section is the tour.
+[docs/developing-plugins.md](docs/developing-plugins.md) is the full guide: the
+complete API, how options and matching resolve, and the gotchas worth knowing
+before you ship one.
 
 ```ts
 import { definePlugin } from './src/mod.ts'
@@ -150,40 +164,86 @@ params, and results all autocomplete and typecheck.
 
 ### Hooks
 
-Message hooks see traffic in flight: `onRequest` (client → browser), `onResponse`,
-and `onEvent` (browser → client). Add `match: ['Network.*']` to a definition to
-only be called for the methods you care about.
+Message hooks see traffic in flight: `onRequest` (client → browser),
+`onResponse`, and `onEvent` (browser → client). Add `match: ['Network.*']` to a
+definition to only be called for the methods you care about — including on
+`onResponse`, which is told which command it answers via `msg.method` even
+though the wire format of a reply carries no method.
 
 From `onRequest` you can return:
 
-| Return | Effect |
-| --- | --- |
-| the message, modified or not | forward it |
-| nothing | forward unchanged |
-| `null` | drop it silently |
-| `{ respond: result }` | answer the client; never reaches the browser |
+| Return                       | Effect                                                 |
+| ---------------------------- | ------------------------------------------------------ |
+| the message, modified or not | forward it                                             |
+| nothing                      | forward unchanged                                      |
+| `{ respond: result }`        | answer the client; never reaches the browser           |
+| `null`                       | refuse it: the client gets an error naming your plugin |
+
+To hide a command while keeping the client happy, use `{ respond: {} }` rather
+than `null` — that is what `stealth` does with `Runtime.enable`. Every CDP
+command has a client waiting on its id, so a refusal has to be answered;
+returning `null` used to discard the command and hang the caller until its own
+timeout.
 
 Lifecycle hooks tell you where you are: `onSessionStart`, `onSessionEnd`,
 `onTargetAttached`, `onTargetDetached`, and `onDocument`.
 
 `onDocument` is usually the one you want. It fires whenever any frame commits a
-new document, handing you `{ sessionId, frameId, loaderId, url, isMain }` already
-worked out, so you never have to sequence raw `Page.*` traffic yourself. It fires
-for subframes too — the case that is easy to forget and where anything touching
-execution contexts tends to break.
+new document, handing you `{ sessionId, frameId, loaderId, url, isMain }`
+already worked out, so you never have to sequence raw `Page.*` traffic yourself.
+It fires for subframes too — the case that is easy to forget and where anything
+touching execution contexts tends to break.
 
 ### The context object
 
-`ctx.send()` issues CDP commands whose responses resolve to your plugin alone and
-are never leaked to the client. `ctx.emit()` injects synthetic CDP events into the
-client's stream, in order. `ctx.targets` is a live view of attached targets keyed
-by CDP session id. `ctx.signal` aborts when the session tears down — check it
-before reporting a failure, because every in-flight `send` rejects at that point
-by design. `ctx.log()` writes through the configured log level, tagged with your
-plugin and session.
+`ctx.send()` issues CDP commands whose responses resolve to your plugin alone
+and are never leaked to the client. `ctx.emit()` injects synthetic CDP events
+into the client's stream, in order. `ctx.targets` is a live view of attached
+targets keyed by CDP session id. `ctx.signal` aborts when the session tears down
+— check it before reporting a failure, because every in-flight `send` rejects at
+that point by design. `ctx.log()` writes through the configured log level,
+tagged with your plugin and session.
+
+`ctx.state(sessionId, init)` is scratch space for one target, created on first
+use and dropped when that target detaches. Plugins outlive the pages they
+configure, so a `Map` keyed by session id in your closure has to be pruned by
+hand and the leak only shows up on long-lived connections. Each plugin sees its
+own.
+
+`ctx.inject(source, sessionId, { world, immediately })` runs `source` at the
+start of every document in a target, subframes included, and returns a function
+that stops future documents from getting it. Pass a `world` name to run in an
+isolated world instead of the page's own:
+
+```ts
+onTargetAttached: ;
+;(async ({ sessionId, type }) => {
+  if (type !== 'page') return
+  await ctx.inject(`self.helper = () => 42`, sessionId, { world: 'mine' })
+})
+```
+
+The page cannot see or reach anything the script defines in a named world, which
+makes it the only way to run plugin code on a page without leaving it something
+to find. To read a result back, evaluate in the same world —
+`Page.createIsolatedWorld({ frameId, worldName })` returns its context id.
+
+There is deliberately **no `ctx.bind`** for calling back out of injected code.
+`Runtime.addBinding` installs its function only into the contexts that exist
+when it is sent, and it is gone after the next navigation unless
+`Runtime.enable` is on; scoping it to a world needs `Runtime.enable` too. So a
+binding channel is either quietly broken or announces the session, and no
+wrapper can fix that. Worse, `Runtime.removeBinding` does not take the installed
+function back off `window`, so a binding leaves a page-visible global behind for
+the life of the document.
 
 A hook that throws is logged and skipped; one bad plugin can never break the
-connection.
+connection. A plugin whose `setup` throws is different — it never installed at
+all, so the session would run on believing it is configured in a way it is not.
+That fails the connection instead, with the plugin named. Add `optional: true`
+to a definition for a plugin whose absence only costs visibility, as `recorder`
+does. `Proxy.hello` reports the plugins actually installed, not the ones
+requested.
 
 ## Debugging a plugin
 
@@ -191,8 +251,15 @@ Your plugin sits in the middle of a message stream you cannot otherwise see, so
 tracing is built in. Turn it on per launch, or with `CDP_DEBUG`:
 
 ```ts
-const browser = await chromium.launch({ plugins: [myPlugin()], debug: 'myplugin' })
+const browser = await chromium.launch({
+  plugins: [myPlugin()],
+  debug: 'myplugin',
+})
 ```
+
+The filter applies to that session alone, so tracing one launch leaves every
+other session in the process untouched. `CDP_DEBUG` supplies the default for
+sessions that do not ask.
 
 ```sh
 CDP_DEBUG=1                  # everything
@@ -201,8 +268,8 @@ CDP_DEBUG=myplugin:Runtime.* # ...narrowed to the methods you care about
 CDP_DEBUG=proxy              # just the transport: forwards, drops, id remapping
 ```
 
-The filter matches `source[:methodGlob]`, where source is a plugin name or `proxy`
-for the transport itself.
+The filter matches `source[:methodGlob]`, where source is a plugin name or
+`proxy` for the transport itself.
 
 ```
 trace: [0c349e67] pipeline: stealth(100) → myplugin(0)
@@ -220,17 +287,17 @@ trace: [0c349e67]   myplugin no hooks ran
 
 You get the resolved pipeline up front — order, priority, the hooks you actually
 implement, and the globs you declared, which is the first thing to check when
-plugins fight over a message or a hook never fires. Then every decision, reported
-as `pass`, `change`, `drop`, `respond`, or `error` and attributed to the plugin
-that made it, alongside the transport's own view of what it forwarded and under
-which remapped id. Your own `ctx.send` and `ctx.emit` traffic is tagged and timed.
-At the end, a summary of invocation counts and time per hook.
+plugins fight over a message or a hook never fires. Then every decision,
+reported as `pass`, `change`, `drop`, `respond`, or `error` and attributed to
+the plugin that made it, alongside the transport's own view of what it forwarded
+and under which remapped id. Your own `ctx.send` and `ctx.emit` traffic is
+tagged and timed. At the end, a summary of invocation counts and time per hook.
 
 Two things are reported even with tracing off, because both are otherwise
 completely silent and both are nearly always bugs:
 
-- **A `match` glob that never matched.** Typo `Runtim.*` and your hooks just never
-  run, which looks exactly like a plugin that works. You get told instead.
+- **A `match` glob that never matched.** Typo `Runtim.*` and your hooks just
+  never run, which looks exactly like a plugin that works. You get told instead.
 - **A `ctx.send` still in flight when the session ended**, named with the plugin
   and method, so a hang points straight at its own cause.
 
@@ -243,7 +310,8 @@ plugin, method, and CDP session.
 Any method under `Proxy.` is answered by the proxy or by a plugin and never
 reaches Chrome. That gives client code a channel to your plugin through
 Playwright's own raw-CDP escape hatch. `rpc()` wraps a CDP session to give that
-namespace real types, since Playwright's own `send` only knows the real protocol:
+namespace real types, since Playwright's own `send` only knows the real
+protocol:
 
 ```ts
 import { rpc } from './src/mod.ts'
@@ -254,10 +322,10 @@ await proxy.debug() // { tracing, plugins: [{ name, hooks, match, calls }] }
 await proxy.send<{ entries: Entry[] }>('Proxy.history') // a plugin's own method
 ```
 
-`hello().upstream` reports which browser this session landed on — the quickest way
-to confirm pooling or `isolation: 'browser'` is doing what you expect. `debug()`
-returns the same picture the trace lines paint, so your plugin's own tests can
-assert its hooks ran rather than scraping logs:
+`hello().upstream` reports which browser this session landed on — the quickest
+way to confirm pooling or `isolation: 'browser'` is doing what you expect.
+`debug()` returns the same picture the trace lines paint, so your plugin's own
+tests can assert its hooks ran rather than scraping logs:
 
 ```ts
 const { plugins } = await proxy.debug()
@@ -269,10 +337,11 @@ of by the runtime — that is all it takes to expose your own.
 
 ## Running as a server
 
-The SDK runs the proxy in-process, which is all most people need. You can also run
-it standalone — one process fronting a browser, a remote CDP endpoint, or a pool
-of them — and connect clients over the network. Copy `.env.example` to `.env`
-first, so the proxy listens on a known port instead of picking a free one:
+The SDK runs the proxy in-process, which is all most people need. You can also
+run it standalone — one process fronting a browser, a remote CDP endpoint, or a
+pool of them — and connect clients over the network. Copy `.env.example` to
+`.env` first, so the proxy listens on a known port instead of picking a free
+one:
 
 ```sh
 cp .env.example .env   # CDP_PROXY_PORT=9994
@@ -300,8 +369,8 @@ const browser = await chromium.connectOverCDP('http://localhost:9994', {
 ```
 
 The token rides a header rather than the URL because `connectOverCDP` discards
-query strings when it follows `/json/version` to the real WebSocket — and because
-the browser must never see it.
+query strings when it follows `/json/version` to the real WebSocket — and
+because the browser must never see it.
 
 Plugins named this way are loaded from `plugins/` at startup. Rename a file to
 `*.disabled.ts` to park it without deleting it. Embedded SDK use loads nothing
@@ -312,87 +381,90 @@ from disk unless you set `CDP_PLUGINS_DIRECTORY`.
 Everything is environment-driven with a working default for each value; see
 `.env.example`.
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `CDP_PROXY_PORT` / `CDP_PROXY_HOST` | free port / `localhost` | Where the proxy listens |
-| `CDP_BROWSER_PORT` / `CDP_BROWSER_HOST` | free port / `localhost` | Where the managed browser listens |
-| `CDP_BROWSER_EXECUTABLE_PATH` | auto-detected | Browser binary to launch |
-| `CDP_BROWSER_WS_ENDPOINT` | — | Front an existing browser instead of launching one |
-| `CDP_HEADLESS` | `true` | Headless, or headful for local debugging |
-| `CDP_ISOLATION` | `context` | Default session isolation: `context` or `browser` |
-| `CDP_PLUGINS_DIRECTORY` | `plugins` standalone, none embedded | Plugins to expose by name |
-| `CDP_PROXY_LOG_LEVEL` | `verbose` | `silent`, `error`, `warn`, `info`, `verbose` |
-| `CDP_PROXY_LOG_TAGS` | all | Comma-separated modules to log, e.g. `proxy,stealth` |
-| `CDP_DEBUG` | — | Plugin trace filter — see [Debugging a plugin](#debugging-a-plugin) |
+| Variable                                | Default                             | Purpose                                                             |
+| --------------------------------------- | ----------------------------------- | ------------------------------------------------------------------- |
+| `CDP_PROXY_PORT` / `CDP_PROXY_HOST`     | free port / `localhost`             | Where the proxy listens                                             |
+| `CDP_BROWSER_PORT` / `CDP_BROWSER_HOST` | free port / `localhost`             | Where the managed browser listens                                   |
+| `CDP_BROWSER_EXECUTABLE_PATH`           | auto-detected                       | Browser binary to launch                                            |
+| `CDP_BROWSER_WS_ENDPOINT`               | —                                   | Front an existing browser instead of launching one                  |
+| `CDP_HEADLESS`                          | `true`                              | Headless, or headful for local debugging                            |
+| `CDP_ISOLATION`                         | `context`                           | Default session isolation: `context` or `browser`                   |
+| `CDP_PLUGINS_DIRECTORY`                 | `plugins` standalone, none embedded | Plugins to expose by name                                           |
+| `CDP_PROXY_LOG_LEVEL`                   | `verbose`                           | `silent`, `error`, `warn`, `info`, `verbose`                        |
+| `CDP_PROXY_LOG_TAGS`                    | all                                 | Comma-separated modules to log, e.g. `proxy,stealth`                |
+| `CDP_DEBUG`                             | —                                   | Plugin trace filter — see [Debugging a plugin](#debugging-a-plugin) |
 
 With `CDP_BROWSER_EXECUTABLE_PATH` unset, the newest "Chrome for Testing" in
 Playwright's cache is used. That default is deliberate — see the first gotcha.
 
-Logs print to the console and are mirrored to OpenTelemetry when the host app has
-registered a global logger provider; [docs/telemetry.md](docs/telemetry.md) covers
-the spans and attributes the proxy adds.
+Logs print to the console and are mirrored to OpenTelemetry when the host app
+has registered a global logger provider; [docs/telemetry.md](docs/telemetry.md)
+covers the spans and attributes the proxy adds.
 
 ## Gotchas worth knowing
 
 **Do not automate an enterprise-managed Chrome.** On a managed macOS fleet,
 `/Applications/Google Chrome.app` inherits `com.google.Chrome` managed
-preferences. On a fresh profile, policy provisioning — forced extension installs,
-GCM registration — makes Chrome emit `Target.detachedFromTarget` for *every* page
-target a few seconds after launch. Automation then dies mid-run with "Target page,
-context or browser has been closed", with no crash and no clue. This was
-reproduced with a raw CDP socket, no proxy or Playwright involved, and it
-disappears entirely on Chrome for Testing, which ships a different bundle id.
-Check with `ls "/Library/Managed Preferences/com.google.Chrome.plist"`.
+preferences. On a fresh profile, policy provisioning — forced extension
+installs, GCM registration — makes Chrome emit `Target.detachedFromTarget` for
+_every_ page target a few seconds after launch. Automation then dies mid-run
+with "Target page, context or browser has been closed", with no crash and no
+clue. This was reproduced with a raw CDP socket, no proxy or Playwright
+involved, and it disappears entirely on Chrome for Testing, which ships a
+different bundle id. Check with
+`ls "/Library/Managed Preferences/com.google.Chrome.plist"`.
 
 **`page.setContent` needs a console echo.** Playwright's `setContent` calls
-`document.open()` and then waits for its own `console.debug(tag)` to come back as
-a `Runtime.consoleAPICalled` event before clearing the frame lifecycle. With the
-runtime suppressed that event never arrives, so `setContent` would hang until
-timeout. The stealth plugin replays the tag, which is why it works.
+`document.open()` and then waits for its own `console.debug(tag)` to come back
+as a `Runtime.consoleAPICalled` event before clearing the frame lifecycle. With
+the runtime suppressed that event never arrives, so `setContent` would hang
+until timeout. The stealth plugin replays the tag, which is why it works.
 
 **The `Runtime.enable` tell is not page-observable on Chrome 147.** The widely
 cited probe — a getter on an `Error`'s own `stack`, read after `console.debug` —
-no longer fires, because console previews skip accessors and proxy traps. Headless
-Chrome also stringifies console arguments for its own log sink whether or not CDP
-is attached, so `toString`-based probes report false positives in every state.
-Verified against a raw CDP session with `Runtime.enable` as a positive control.
-The smoke test therefore asserts the wire-level invariant — `Runtime.enable` is
-attempted by Playwright and never forwarded — rather than a page-level trap.
+no longer fires, because console previews skip accessors and proxy traps.
+Headless Chrome also stringifies console arguments for its own log sink whether
+or not CDP is attached, so `toString`-based probes report false positives in
+every state. Verified against a raw CDP session with `Runtime.enable` as a
+positive control. The smoke test therefore asserts the wire-level invariant —
+`Runtime.enable` is attempted by Playwright and never forwarded — rather than a
+page-level trap.
 
 ## How it works
 
 A client connects to the proxy exactly as it would to Chrome. The proxy resolves
 that connection's plugin set from its session token, dials the upstream browser,
 and pipes messages through the plugin pipeline in both directions. One client
-socket maps to exactly one browser socket, with all targets multiplexed over it by
-CDP `sessionId` — the same "flatten" transport `connectOverCDP` already uses.
+socket maps to exactly one browser socket, with all targets multiplexed over it
+by CDP `sessionId` — the same "flatten" transport `connectOverCDP` already uses.
 
-| Module | Role |
-| --- | --- |
-| `proxy.ts` | Orchestrator: serves the CDP surface, resolves upstream + plugins per connection |
-| `proxy-connection.ts` | One client socket ↔ one browser socket: id remapping, target registry, pipeline |
-| `plugin.ts` | `definePlugin` and the `Pipeline` that runs hooks in priority order |
-| `session-manager.ts` | Session tokens, isolation mode, concurrency ceiling |
-| `browser-pool.ts` | Browser sourcing: managed local instances, a remote endpoint, or a pool |
-| `debug.ts` | The `CDP_DEBUG` tracer: filters, hook accounting, session summary |
-| `sdk.ts` | The user-facing `chromium.launch()` / `chromium.session()` |
-| `plugins/` | `stealth.ts` and `recorder.ts` |
+| Module                | Role                                                                             |
+| --------------------- | -------------------------------------------------------------------------------- |
+| `proxy.ts`            | Orchestrator: serves the CDP surface, resolves upstream + plugins per connection |
+| `proxy-connection.ts` | One client socket ↔ one browser socket: id remapping, target registry, pipeline  |
+| `plugin.ts`           | `definePlugin` and the `Pipeline` that runs hooks in priority order              |
+| `session-manager.ts`  | Session tokens, isolation mode, concurrency ceiling                              |
+| `browser-pool.ts`     | Browser sourcing: managed local instances, a remote endpoint, or a pool          |
+| `debug.ts`            | The `CDP_DEBUG` tracer: filters, hook accounting, session summary                |
+| `sdk.ts`              | The user-facing `chromium.launch()` / `chromium.session()`                       |
+| `plugins/`            | `stealth.ts` and `recorder.ts`                                                   |
 
 Three invariants keep it honest, all covered by tests:
 
-- **Id remapping.** Client command ids and plugin-originated command ids share one
-  upstream id space, so they can never collide. Responses are restored to the
-  client's original id, and plugin traffic is never visible to the client.
+- **Id remapping.** Client command ids and plugin-originated command ids share
+  one upstream id space, so they can never collide. Responses are restored to
+  the client's original id, and plugin traffic is never visible to the client.
 - **Short-circuiting.** A plugin may answer a request itself, and the command is
   then never forwarded. That is exactly how `Runtime.enable` is suppressed.
-- **Target ownership.** Chrome's auto-attach is browser-wide, so a shared browser
-  offers every client every other client's pages. Each connection claims every
-  context it creates — whether the client or one of its own plugins opened it —
-  and releases the claim when that context is disposed, so a plugin can only
-  configure its own session's targets. The browser's own default context is
+- **Target ownership.** Chrome's auto-attach is browser-wide, so a shared
+  browser offers every client every other client's pages. Each connection claims
+  every context it creates — whether the client or one of its own plugins opened
+  it — and releases the claim when that context is disposed, so a plugin can
+  only configure its own session's targets. The browser's own default context is
   claimed by nobody and stays common ground. Dropping an attachment also means
-  answering for it: clients auto-attach with `waitForDebuggerOnStart`, so a hidden
-  target still has to be released or its real owner hangs on first navigation.
+  answering for it: clients auto-attach with `waitForDebuggerOnStart`, so a
+  hidden target still has to be released or its real owner hangs on first
+  navigation.
 
 ## Development
 
@@ -403,12 +475,12 @@ deno task test:unit  # fast inner loop: skips the test that needs a real browser
 deno task smoke      # only the end-to-end test
 ```
 
-The smoke test drives a real browser through the full stack and skips itself when
-no browser binary can be resolved. Its last step is the only one that leaves the
-machine: it grades the browser against [browserscan.net](https://www.browserscan.net)
-and skips itself when there is no egress. `scratch/` holds throwaway probes used to
-pin down browser behaviour; it is excluded from formatting and is not part of the
-build.
+The smoke test drives a real browser through the full stack and skips itself
+when no browser binary can be resolved. Its last step is the only one that
+leaves the machine: it grades the browser against
+[browserscan.net](https://www.browserscan.net) and skips itself when there is no
+egress. `scratch/` holds throwaway probes used to pin down browser behaviour; it
+is excluded from formatting and is not part of the build.
 
 ## License
 

@@ -13,6 +13,8 @@ export interface SessionRecord {
   token: SessionToken
   plugins: ConfiguredPlugin[]
   isolation: IsolationMode
+  /** Trace filter for this session only; falls back to `CDP_DEBUG` when absent. */
+  debug?: string
   createdAt: number
   connections: number
 }
@@ -45,6 +47,7 @@ export class SessionManager {
   register(
     plugins: ConfiguredPlugin[],
     isolation: IsolationMode = this.#defaultIsolation,
+    debug?: string,
   ): SessionToken {
     for (const rec of this.#sessions.values()) {
       if (this.#expired(rec)) this.#sessions.delete(rec.token)
@@ -55,6 +58,7 @@ export class SessionManager {
       token,
       plugins,
       isolation,
+      debug,
       createdAt: Date.now(),
       connections: 0,
     })

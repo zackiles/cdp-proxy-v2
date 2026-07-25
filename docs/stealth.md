@@ -27,26 +27,67 @@ Playwright needs two worlds per frame:
 The utility world is easy: `Page.createIsolatedWorld` with that name returns an
 id we can announce.
 
-The main world is the hard part, because with the runtime disabled Chrome will
-not tell us its id. The technique (ported from `rebrowser-patches`):
+The main world is the hard part, because with the runtime disabled Chrome will not
+tell us its id. But it does not have to: a remote object's `objectId` has the form
+`<isolate>.<context>.<n>`, so **any handle into a frame names that frame's world**.
+Two calls are enough, and neither needs `Runtime.enable`:
 
-1. `Runtime.addBinding` with a random, throwaway name. A bound function reports
-   its caller's `executionContextId` when invoked.
-2. `Page.addScriptToEvaluateOnNewDocument` (with `runImmediately: true`, so it
-   also lands in the *current* document) installs a listener in the main world
-   that calls that binding.
-3. `Page.createIsolatedWorld` + `Runtime.evaluate` dispatch a `CustomEvent` from
-   the isolated world into the main world.
-4. The listener fires, and the resulting `Runtime.bindingCalled` event carries the
-   real main-world `executionContextId`.
+- **the top frame**: `Runtime.evaluate` with `expression: 'self'`. The reply's
+  `objectId` carries the id.
+- **a subframe**: `DOM.getFrameOwner` → `DOM.describeNode` (pierced, for the
+  content document) → `DOM.resolveNode`. With no `executionContextId` passed,
+  `DOM.resolveNode` resolves the node in **its own frame's** default world, which
+  is the only way to name a subframe's main world from outside. Works for
+  cross-origin subframes too.
 
-The binding and the injected script are then **removed**. Leaving a random
-function on `window` and a listener in every future document would itself be a
-tell, and the next navigation derives a fresh pair anyway.
+The handle is released with `Runtime.releaseObject` — it is invisible to the page,
+but holding it would pin the frame's objects for the life of the session.
 
 The derived ids are announced to the client as synthetic
-`Runtime.executionContextCreated` events, and `Runtime.bindingCalled` for our own
-binding is swallowed so the handshake never leaks.
+`Runtime.executionContextCreated` events.
+
+### The binding this replaced
+
+The original technique (ported from `rebrowser-patches`) installed a
+`Runtime.addBinding` under a random `__pw_*` name plus an on-new-document listener,
+had an isolated world poke it with a `CustomEvent`, and read the id off the
+resulting `Runtime.bindingCalled`. It worked, and it removed the binding afterwards
+— but `Runtime.removeBinding` only stops *future* contexts receiving the binding.
+**The function it already installed stays on `window` for the life of the
+document.** Measured on a stock stealth session, every page carried one or two
+`__pw_<hex>` globals, permanently, and they accumulated across navigations.
+
+That is a worse tell than the one the plugin exists to remove: uniquely named,
+enumerable in one line with `Object.getOwnPropertyNames(window)`, and prefixed with
+Playwright's own initials. The handle-based derivation touches nothing in the page,
+costs two round trips instead of six, and is covered by a smoke assertion that no
+`__`-prefixed global survives a navigation.
+
+### Why there is no binding helper either
+
+The obvious follow-up is a `ctx.bind` helper that gets the disposal right so plugin
+authors do not have to. Measured against Chrome 147 on a session with the runtime
+disabled, there is nothing to get right:
+
+| Measurement | Result |
+| --- | --- |
+| `addBinding({ name })`, then read `window` | the function is there |
+| `removeBinding({ name })`, then read `window` | **still there** |
+| `Runtime.evaluate('delete self[name]')` | gone — the only way to remove it |
+| `addBinding`, navigate, then read `window` | **gone, and the channel is dead** |
+| `addBinding({ executionContextName })` + inject into that world | never fires, across three navigations |
+| the same, after one `Runtime.enable` | fires |
+
+So without `Runtime.enable` a binding reaches only the contexts that already exist
+and dies at the next navigation, and scoping it to an isolated world does not work
+at all. A binding channel is therefore either quietly broken or it announces the
+session — a wrapper cannot fix either, so none is offered.
+
+What plugins get instead is `ctx.inject`, which does work cold: a script injected
+with a `worldName` runs in a fresh isolated world on **every** document with the
+runtime disabled, and leaves nothing in the page's own world. Reading a value back
+means evaluating in that world rather than being pushed to, which is a round trip
+the plugin initiates instead of a global the page can find.
 
 ## Navigation and subframes
 
@@ -144,14 +185,21 @@ property the plugin actually guarantees, and which holds regardless of which
 console vectors a given Chrome version happens to expose.
 
 **None of our own calls enable the runtime.** After running the full stealth
-sequence (`Page.enable`, `Runtime.addBinding`,
-`Page.addScriptToEvaluateOnNewDocument`, `Page.createIsolatedWorld`,
-`Runtime.evaluate`, `Emulation.setUserAgentOverride`), no `consoleAPICalled` was
-ever delivered — confirming the derivation is genuinely runtime-free.
+sequence (`Page.enable`, `Runtime.evaluate`, `DOM.resolveNode`,
+`Page.createIsolatedWorld`, `Emulation.setUserAgentOverride`), no
+`consoleAPICalled` was ever delivered — confirming the derivation is genuinely
+runtime-free. `DOM.*` needs no explicit `DOM.enable` and, unlike `Runtime.enable`,
+changes nothing the page can observe.
 
 **`document.open()` does not destroy contexts.** It reuses the same global, and
 Chrome emits neither `executionContextsCleared` nor `executionContextCreated`
 around it, so no re-derivation is needed for `setContent`.
+
+**`Page.addScriptToEvaluateOnNewDocument` needs `Page.enable` on the same CDP
+session.** Without it the command succeeds, returns an identifier, and the script
+then never runs — no error anywhere, and the world it names is never created.
+Domain state is per-session in flatten mode, so the client having enabled `Page`
+does not help. `ctx.inject` sends `Page.enable` itself for this reason.
 
 ## Other tells handled
 
@@ -162,3 +210,30 @@ around it, so no re-derivation is needed for `setContent`.
 - **`navigator.webdriver`.** Never set, because `--enable-automation` is
   deliberately absent from the launch flags (see `constants.ts`); that flag would
   set `navigator.webdriver = true` and show the automation infobar.
+- **`navigator.languages`.** Headless reports the single entry `['en-US']`. An
+  `acceptLanguage` is passed with the UA override so the list has the shape
+  Chrome's does. Note the value is `en-US,en`, *not* a real header's
+  `en-US,en;q=0.9`: Chrome splits the string on commas to build
+  `navigator.languages`, so the q-weight would show up as a literal language
+  called `en;q=0.9`. Set it to match the country of whatever network proxy the
+  session goes out through.
+- **The display.** Playwright pins `screenWidth`/`screenHeight` to the viewport it
+  was configured with, so headless reports `screen.width === innerWidth` — no real
+  monitor is exactly the size of a browser viewport. The plugin rewrites those two
+  fields (and `deviceScaleFactor`) on the client's own
+  `Emulation.setDeviceMetricsOverride`, leaving the requested viewport untouched, so
+  `page.viewportSize()` and screenshots are unaffected. Configure with
+  `stealth({ screen: { width, height, scale } })`.
+- **The window.** Playwright then sizes the window to the viewport exactly, leaving
+  `outerHeight === innerHeight` — a Chrome window with no tab strip and no toolbar.
+  Its `Browser.setWindowBounds` is rewritten to add the 88px those occupy. Doing it
+  by rewriting Playwright's own call rather than issuing our own matters:
+  `Browser.setWindowBounds` clears any metrics override in place, and Playwright
+  sends the two back to back, so an override sent ahead of it would be discarded.
+- **WebGL.** `--disable-gpu` leaves the page with *no* WebGL context at all, and
+  every real Chrome has one, so `!!canvas.getContext('webgl')` is a one-line
+  headless test. The flag is gone; `--use-gl=angle` keeps the genuine GPU renderer
+  string (on this machine, `ANGLE (Apple, ANGLE Metal Renderer: Apple M4 Pro…)`)
+  and `--enable-unsafe-swiftshader` lifts Chrome's block on software WebGL so a
+  machine or container without a GPU still gets a context. Nothing is spoofed —
+  the reported renderer is the real one.

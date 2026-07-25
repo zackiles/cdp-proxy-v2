@@ -15,6 +15,7 @@ import type {
   CDPTarget,
   ConfiguredPlugin,
   ConnectionId,
+  InjectOptions,
   PluginContext,
   SessionId,
   SessionToken,
@@ -34,6 +35,12 @@ export interface SessionSpec {
   connectionId: ConnectionId
   upstreamWsUrl: string
   plugins: ConfiguredPlugin[]
+  /**
+   * Trace filter for this session alone. Absent falls back to `CDP_DEBUG`, which
+   * is what a standalone proxy uses; tracing one session must not retune every
+   * other session sharing the process.
+   */
+  debug?: string
   /** Invoked exactly once when the connection is torn down (for reaping). */
   onClose?: (connectionId: ConnectionId) => void
   /**
@@ -86,12 +93,14 @@ export class ProxyConnection {
   readonly #foreignSessions = new Set<SessionId>()
   /** Proxy-originated ids whose replies belong to nobody and must not be sent on. */
   readonly #swallow = new Set<number>()
+  /** `ctx.state`, keyed by target first so a detach drops every plugin's at once. */
+  readonly #state = new Map<SessionId, Map<string, unknown>>()
 
   readonly #abort = new AbortController()
   readonly #debug: Debug
   #pipeline: Pipeline | undefined
-  #browserChain: Promise<void> = Promise.resolve()
-  #clientChain: Promise<void> = Promise.resolve()
+  readonly #browserChains = new Map<string, Promise<void>>()
+  readonly #clientChains = new Map<string, Promise<void>>()
   #reaped = false
 
   #resolveBrowserOpen!: () => void
@@ -107,7 +116,9 @@ export class ProxyConnection {
     this.sessionToken = spec.sessionToken
     this.#spec = spec
     this.#contextOwners = spec.contextOwners ?? new Map()
-    this.#debug = Debug.for(spec.sessionToken)
+    this.#debug = spec.debug === undefined
+      ? Debug.for(spec.sessionToken)
+      : Debug.using(spec.debug, spec.sessionToken)
     this.#clientSocket = clientSocket
     this.#browserSocket = new WebSocket(spec.upstreamWsUrl)
 
@@ -179,6 +190,40 @@ export class ProxyConnection {
       this.#sendToClient(JSON.stringify(evt))
     }
 
+    const inject = async (
+      source: string,
+      sessionId: SessionId,
+      options: InjectOptions = {},
+    ): Promise<() => Promise<void>> => {
+      // DANGER: without the Page domain enabled on *this* session the script is
+      // accepted and then silently never runs — no error, and the world it names
+      // is never created. Domain state is per-session, so a plugin cannot rely on
+      // the client having enabled it.
+      await send('Page.enable', undefined, sessionId)
+      const { identifier } = await send(
+        'Page.addScriptToEvaluateOnNewDocument',
+        {
+          source,
+          worldName: options.world,
+          runImmediately: options.immediately ?? false,
+        },
+        sessionId,
+      ) as { identifier: string }
+      return () =>
+        send(
+          'Page.removeScriptToEvaluateOnNewDocument',
+          { identifier },
+          sessionId,
+        ).then(() => {}, () => {})
+    }
+
+    const state = <T>(sessionId: SessionId, init: () => T): T => {
+      let byPlugin = this.#state.get(sessionId)
+      if (!byPlugin) this.#state.set(sessionId, byPlugin = new Map())
+      if (!byPlugin.has(plugin)) byPlugin.set(plugin, init())
+      return byPlugin.get(plugin) as T
+    }
+
     const pluginLog = Logger.get(`plugin:${plugin}`)
     const session = this.sessionToken.slice(0, 8)
 
@@ -191,6 +236,8 @@ export class ProxyConnection {
       send: send as any,
       // deno-lint-ignore no-explicit-any
       emit: emit as any,
+      inject,
+      state,
       log: (...args: unknown[]) => {
         const error = args.find((a) => a instanceof Error) as Error | undefined
         const message = args
@@ -212,23 +259,73 @@ export class ProxyConnection {
       this.#reap('upstream connect failed')
       return
     }
-    this.#pipeline = await Pipeline.install(
-      this.#spec.plugins,
-      (plugin) => this.#ctx(plugin),
-      this.#debug,
-    )
+    try {
+      this.#pipeline = await Pipeline.install(
+        this.#spec.plugins,
+        (plugin) => this.#ctx(plugin),
+        this.#debug,
+      )
+    } catch (err) {
+      this.#reap(asError(err).message)
+      return
+    }
     await this.#pipeline.onSessionStart()
+  }
+
+  /**
+   * Queue work so that order holds *within* a CDP session rather than across the
+   * whole connection. Two pages are independent, so a plugin that awaits while
+   * handling one should not stall every other page. Browser-level messages, which
+   * have no session, share the root chain.
+   *
+   * DANGER: a session's chain is seeded from the root chain as it is created, not
+   * from a fresh promise. Everything a session depends on having happened first —
+   * the `Target.attachedToTarget` that registers it in `#targets`, the
+   * `onTargetAttached` hooks that let plugins set up for it, and the ownership check
+   * that decides whether it is even ours — is handled on the root chain. Seed from
+   * `Promise.resolve()` and a page's first event can overtake its own attach, at
+   * which point a plugin reading `ctx.targets` finds nothing there.
+   */
+  #order(
+    chains: Map<string, Promise<void>>,
+    sessionId: SessionId | undefined,
+    run: () => Promise<void>,
+  ): void {
+    const key = sessionId ?? ''
+    const previous = chains.get(key) ?? chains.get('') ?? Promise.resolve()
+    chains.set(
+      key,
+      previous.then(run).catch((err) =>
+        log.error('message failed', { error: asError(err) })
+      ),
+    )
+  }
+
+  /** Forget a target's queue once it is gone, so a long connection stays flat. */
+  #retire(sessionId: SessionId): void {
+    this.#browserChains.delete(sessionId)
+    this.#clientChains.delete(sessionId)
   }
 
   // ─── client socket ────────────────────────────────────────────────────────
   #wireClient(): void {
     this.#clientSocket.onmessage = (e) => {
       const raw = typeof e.data === 'string' ? e.data : String(e.data)
-      this.#clientChain = this.#clientChain
-        .then(() => this.#forwardClientMessage(raw))
-        .catch((err) =>
-          log.error('client message failed', { error: asError(err) })
-        )
+      let msg: CDPRequest | undefined
+      try {
+        msg = JSON.parse(raw) as CDPRequest
+      } catch { /* not ours to rewrite; passed through in order below */ }
+
+      this.#order(
+        this.#clientChains,
+        msg?.sessionId,
+        msg && typeof msg.id === 'number'
+          ? () => this.#forwardClientMessage(msg)
+          : async () => {
+            await this.#initDone
+            if (!this.#reaped) this.#sendToBrowser(raw)
+          },
+      )
     }
     this.#clientSocket.onclose = () => this.#reap('client socket closed')
     this.#clientSocket.onerror = () => {
@@ -236,21 +333,9 @@ export class ProxyConnection {
     }
   }
 
-  async #forwardClientMessage(raw: string): Promise<void> {
+  async #forwardClientMessage(msg: CDPRequest): Promise<void> {
     await this.#initDone
     if (this.#reaped) return
-
-    let msg: CDPRequest
-    try {
-      msg = JSON.parse(raw)
-    } catch {
-      this.#sendToBrowser(raw)
-      return
-    }
-    if (typeof msg.id !== 'number') {
-      this.#sendToBrowser(raw)
-      return
-    }
 
     const at = this.#session(msg.sessionId)
     this.#debug.trace('proxy', msg.method, `→ ${msg.method} #${msg.id}${at}`)
@@ -328,11 +413,11 @@ export class ProxyConnection {
         return
       }
       if (typeof msg.id === 'number' && this.#swallow.delete(msg.id)) return
-      this.#browserChain = this.#browserChain
-        .then(() => this.#forwardBrowserMessage(msg, raw))
-        .catch((err) =>
-          log.error('browser message failed', { error: asError(err) })
-        )
+      this.#order(
+        this.#browserChains,
+        msg.sessionId,
+        () => this.#forwardBrowserMessage(msg, raw),
+      )
     }
   }
 
@@ -360,8 +445,11 @@ export class ProxyConnection {
         }`,
       )
       msg.id = pending.clientId
+      msg.method = pending.method
       const out = await pipeline.onResponse(msg)
       if (out === null) return
+      // `method` is the proxy's own addition, not part of the reply format.
+      delete out.method
       this.#sendToClient(JSON.stringify(out))
       return
     }
@@ -468,7 +556,9 @@ export class ProxyConnection {
     // params rather than on the envelope.
     if (evt.method === 'Target.detachedFromTarget') {
       const session = params.sessionId as SessionId | undefined
-      return session ? this.#foreignSessions.delete(session) : false
+      if (!session) return false
+      this.#retire(session)
+      return this.#foreignSessions.delete(session)
     }
 
     return !!evt.sessionId && this.#foreignSessions.has(evt.sessionId)
@@ -514,6 +604,8 @@ export class ProxyConnection {
         if (target) {
           this.#targets.delete(sessionId)
           await pipeline.onTargetDetached(target)
+          // After the hook, so a plugin winding down can still read what it kept.
+          this.#state.delete(sessionId)
         }
       }
     }
@@ -525,7 +617,9 @@ export class ProxyConnection {
       this.#respondToClient(req.id, req.sessionId, {
         connectionId: this.connectionId,
         sessionToken: this.sessionToken,
-        plugins: this.#spec.plugins.map((p) => p.name),
+        // What is installed, not what was asked for: reporting the request would
+        // name a plugin that failed to set up and is doing nothing.
+        plugins: this.#pipeline?.names ?? [],
         // Which browser this session landed on — the answer to "is my pooled or
         // per-site isolation actually doing anything?".
         upstream: new URL(this.#spec.upstreamWsUrl).host,
@@ -592,6 +686,8 @@ export class ProxyConnection {
       entry.settle({ id: -1, error: { code: -32000, message: reason } })
     }
     this.#pluginRequests.clear()
+    this.#browserChains.clear()
+    this.#clientChains.clear()
 
     // Chrome discards this connection's contexts with its socket, so holding the
     // claims would only make their ids look owned to whoever connects next.
@@ -604,6 +700,7 @@ export class ProxyConnection {
         log.error('onSessionEnd failed', { error: asError(e) })
       )
     }
+    this.#state.clear()
     // After onSessionEnd so its own cost is accounted for.
     this.#debug.summary(outstanding)
     try {

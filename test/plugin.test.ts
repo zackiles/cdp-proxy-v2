@@ -1,4 +1,4 @@
-import { assert, assertEquals } from '@std/assert'
+import { assert, assertEquals, assertRejects } from '@std/assert'
 import { definePlugin, Pipeline } from '../src/plugin.ts'
 import type {
   CDPRequest,
@@ -10,6 +10,7 @@ type StubContext = PluginContext & { emitted: [string, unknown][] }
 
 function stubContext(): StubContext {
   const emitted: [string, unknown][] = []
+  const state = new Map<string, unknown>()
   // The typed send/emit signatures are generic over the CDP protocol, so the
   // stub is asserted into place once rather than reimplementing them.
   return {
@@ -20,6 +21,12 @@ function stubContext(): StubContext {
     signal: new AbortController().signal,
     send: () => Promise.resolve({}),
     emit: (method: string, params: unknown) => emitted.push([method, params]),
+    inject: () => Promise.resolve(() => Promise.resolve()),
+    state: <T>(sessionId: string, init: () => T): T => {
+      const key = sessionId
+      if (!state.has(key)) state.set(key, init())
+      return state.get(key) as T
+    },
     log: () => {},
   } as unknown as StubContext
 }
@@ -119,14 +126,23 @@ Deno.test('Pipeline short-circuits on {respond} and skips later plugins', async 
   assertEquals(laterRan, false)
 })
 
-Deno.test('Pipeline drops a request when a plugin returns null', async () => {
+Deno.test('a refused request is answered, never left unanswered', async () => {
   const dropper = definePlugin({
     name: 'drop',
     setup: () => ({ onRequest: () => null }),
   })()
 
   const { pipe } = await pipeline([dropper])
-  assertEquals(await pipe.onRequest(request('Runtime.enable')), null)
+  const out = await pipe.onRequest(request('Runtime.enable'))
+
+  assertEquals(out, {
+    respond: {
+      error: {
+        code: -32000,
+        message: 'Runtime.enable was refused by plugin "drop"',
+      },
+    },
+  })
 })
 
 Deno.test('Pipeline treats a void onRequest as unmodified forward', async () => {
@@ -184,17 +200,36 @@ Deno.test('Pipeline isolates a throwing hook and keeps the message flowing', asy
   assertEquals((out as CDPRequest).params, { survived: true })
 })
 
-Deno.test('Pipeline isolates a failing setup and still installs the rest', async () => {
+Deno.test('a plugin that cannot set up fails the whole session', async () => {
   const broken = definePlugin({
     name: 'broken',
     setup: () => {
-      throw new Error('setup failed')
+      throw new Error('no dice')
+    },
+  })()
+  const ok = definePlugin({ name: 'ok', setup: () => ({}) })()
+
+  // Installing the rest and carrying on would leave the session claiming a
+  // configuration it does not have.
+  await assertRejects(
+    () => pipeline([broken, ok]),
+    Error,
+    'plugin setup failed: broken (no dice)',
+  )
+})
+
+Deno.test('an optional plugin that cannot set up is skipped', async () => {
+  const broken = definePlugin({
+    name: 'broken',
+    optional: true,
+    setup: () => {
+      throw new Error('no dice')
     },
   })()
   const ok = definePlugin({ name: 'ok', setup: () => ({}) })()
 
   const { pipe } = await pipeline([broken, ok])
-  assertEquals(pipe.size, 1)
+  assertEquals(pipe.names, ['ok'])
 })
 
 Deno.test('Pipeline chains and can drop responses and events', async () => {

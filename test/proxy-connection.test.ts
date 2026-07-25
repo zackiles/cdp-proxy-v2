@@ -35,6 +35,8 @@ interface Options {
   contextOwners?: Map<string, ConnectionId>
   /** Answer a command with a real result instead of the canned `{ of: method }`. */
   reply?: (msg: CDPRequest) => Record<string, unknown> | undefined
+  /** Trace filter for this session alone. */
+  debug?: string
 }
 
 /**
@@ -77,6 +79,7 @@ async function harness(
       connectionId: options.connectionId ?? 'conn',
       upstreamWsUrl: `ws://127.0.0.1:${browserPort}/devtools/browser/x`,
       plugins,
+      debug: options.debug,
       contextOwners: options.contextOwners,
     })
     return response
@@ -225,7 +228,195 @@ Deno.test('a plugin can answer a request without the browser ever seeing it', as
   }
 })
 
-Deno.test('a dropped request produces no upstream traffic and no reply', async () => {
+Deno.test('one slow target does not stall the others', async () => {
+  const plugin = definePlugin({
+    name: 'slow',
+    setup: () => ({
+      onEvent: async (evt) => {
+        if (evt.sessionId === 'slow') {
+          await new Promise((r) => setTimeout(r, 300))
+        }
+        return evt
+      },
+    }),
+  })()
+
+  const h = await harness([plugin])
+  try {
+    h.pushEvent({ method: 'Page.loadEventFired', sessionId: 'slow' })
+    h.pushEvent({ method: 'Page.loadEventFired', sessionId: 'quick' })
+    await h.waitForClient(2)
+
+    // On one queue for the whole connection the quick page waited out the slow one,
+    // so every page's latency was the worst page's latency.
+    assertEquals(h.clientSaw.map((m) => m.sessionId), ['quick', 'slow'])
+  } finally {
+    await h.close()
+  }
+})
+
+Deno.test('a target never sees traffic before its own attach is handled', async () => {
+  const order: string[] = []
+  const plugin = definePlugin({
+    name: 'ordered',
+    setup: (_cfg, ctx) => ({
+      onTargetAttached: async () => {
+        await new Promise((r) => setTimeout(r, 200))
+        order.push('attached')
+      },
+      onEvent: (evt) => {
+        if (evt.method === 'Page.loadEventFired') {
+          order.push(`event targets=${ctx.targets.size}`)
+        }
+        return evt
+      },
+    }),
+  })()
+
+  const h = await harness([plugin])
+  try {
+    // Browser-level attach, then immediate traffic for the target it announced.
+    h.pushEvent({
+      method: 'Target.attachedToTarget',
+      params: { sessionId: 'S', targetInfo: { targetId: 't', type: 'page' } },
+    })
+    h.pushEvent({ method: 'Page.loadEventFired', sessionId: 'S' })
+    await h.waitForClient(2)
+
+    // Per-session queues must still be seeded from the root queue, or a plugin
+    // reading ctx.targets on the first message finds the target missing.
+    assertEquals(order, ['attached', 'event targets=1'])
+  } finally {
+    await h.close()
+  }
+})
+
+Deno.test('per-target state is dropped with the target, and is per plugin', async () => {
+  const counts: string[] = []
+  const counter = (name: string) =>
+    definePlugin({
+      name,
+      setup: (_cfg, ctx) => ({
+        onEvent(evt) {
+          if (evt.method === 'Page.loadEventFired' && evt.sessionId) {
+            const state = ctx.state(evt.sessionId, () => ({ seen: 0 }))
+            counts.push(`${name}=${++state.seen}`)
+          }
+          return evt
+        },
+      }),
+    })()
+
+  const h = await harness([counter('a'), counter('b')])
+  try {
+    const attached = {
+      method: 'Target.attachedToTarget',
+      params: { sessionId: 'S', targetInfo: { targetId: 't', type: 'page' } },
+    }
+    h.pushEvent(attached)
+    h.pushEvent({ method: 'Page.loadEventFired', sessionId: 'S' })
+    h.pushEvent({ method: 'Page.loadEventFired', sessionId: 'S' })
+    await until(() => counts.length === 4)
+
+    // The page closes, and a later one is handed the same session id.
+    h.pushEvent({
+      method: 'Target.detachedFromTarget',
+      params: { sessionId: 'S' },
+    })
+    h.pushEvent(attached)
+    h.pushEvent({ method: 'Page.loadEventFired', sessionId: 'S' })
+    await until(() => counts.length === 6)
+
+    // Each plugin counts on its own, and neither carries the closed page's tally
+    // into the new one — which is what hand-pruning on detach forgets to do.
+    assertEquals(counts, ['a=1', 'b=1', 'a=2', 'b=2', 'a=1', 'b=1'])
+  } finally {
+    await h.close()
+  }
+})
+
+Deno.test('ctx.inject enables Page first, and can be undone', async () => {
+  let off!: () => Promise<void>
+  const plugin = definePlugin({
+    name: 'injector',
+    setup: (_cfg, ctx) => ({
+      onTargetAttached: async (target) => {
+        off = await ctx.inject('globalThis.x = 1', target.sessionId, {
+          world: 'private',
+        })
+      },
+    }),
+  })()
+
+  const h = await harness([plugin], {
+    reply: (msg) =>
+      msg.method === 'Page.addScriptToEvaluateOnNewDocument'
+        ? { identifier: 'SCRIPT-1' }
+        : undefined,
+  })
+  try {
+    h.pushEvent({
+      method: 'Target.attachedToTarget',
+      params: { sessionId: 'S', targetInfo: { targetId: 't', type: 'page' } },
+    })
+    await h.waitForBrowser(2)
+
+    // DANGER: without Page enabled on this very session the script is accepted
+    // and then never runs, and the world it names is never created.
+    assertEquals(h.browserSaw[0].method, 'Page.enable')
+    assertEquals(h.browserSaw[0].sessionId, 'S')
+    assertEquals(
+      h.browserSaw[1].method,
+      'Page.addScriptToEvaluateOnNewDocument',
+    )
+    assertEquals(h.browserSaw[1].params, {
+      source: 'globalThis.x = 1',
+      worldName: 'private',
+      runImmediately: false,
+    })
+
+    await off()
+    assertEquals(
+      h.browserSaw[2].method,
+      'Page.removeScriptToEvaluateOnNewDocument',
+    )
+    assertEquals(h.browserSaw[2].params, { identifier: 'SCRIPT-1' })
+    assertEquals(h.clientSaw.map((m) => m.method), ['Target.attachedToTarget'])
+  } finally {
+    await h.close()
+  }
+})
+
+Deno.test('a reply names the command it answers, and the client never sees it', async () => {
+  const seen: (string | undefined)[] = []
+  const filtered: (string | undefined)[] = []
+  const watcher = definePlugin({
+    name: 'watcher',
+    setup: () => ({ onResponse: (msg) => void seen.push(msg.method) }),
+  })()
+  // A reply carries no method on the wire, so `match` could not filter onResponse
+  // at all before the proxy started supplying one.
+  const narrow = definePlugin({
+    name: 'narrow',
+    match: ['Target.*'],
+    setup: () => ({ onResponse: (msg) => void filtered.push(msg.method) }),
+  })()
+
+  const h = await harness([watcher, narrow])
+  try {
+    h.send({ id: 1, method: 'Runtime.evaluate' })
+    h.send({ id: 2, method: 'Target.getTargets' })
+    await h.waitForClient(2)
+
+    assertEquals(seen, ['Runtime.evaluate', 'Target.getTargets'])
+    assertEquals(filtered, ['Target.getTargets'])
+    assertEquals(h.clientSaw.map((m) => 'method' in m), [false, false])
+  } finally {
+    await h.close()
+  }
+})
+
+Deno.test('a refused request never reaches the browser but still answers the client', async () => {
   const plugin = definePlugin({
     name: 'dropper',
     setup: () => ({ onRequest: () => null }),
@@ -237,7 +428,15 @@ Deno.test('a dropped request produces no upstream traffic and no reply', async (
     await new Promise((r) => setTimeout(r, 60))
 
     assertEquals(h.browserSaw, [])
-    assertEquals(h.clientSaw, [])
+    // Leaving the client unanswered hung it on id 9 until its own timeout, with
+    // nothing on the wire to say why.
+    assertEquals(h.clientSaw, [{
+      id: 9,
+      error: {
+        code: -32000,
+        message: 'Runtime.enable was refused by plugin "dropper"',
+      },
+    }])
   } finally {
     await h.close()
   }
@@ -312,6 +511,28 @@ Deno.test('Proxy.hello is answered locally by the custom RPC surface', async () 
     assertEquals(h.browserSaw, [], 'Proxy.* must not reach the browser')
   } finally {
     await h.close()
+  }
+})
+
+Deno.test('tracing one session leaves the others alone', async () => {
+  const traced = await harness([], { debug: 'stealth:Runtime.*' })
+  const quiet = await harness([])
+  try {
+    traced.send({ id: 1, method: 'Proxy.debug' })
+    quiet.send({ id: 1, method: 'Proxy.debug' })
+    await traced.waitForClient(1)
+    await quiet.waitForClient(1)
+
+    const filters = (saw: Record<string, unknown>[]) =>
+      (saw[0].result as { tracing: string[] }).tracing
+
+    // A process-wide filter meant that asking for one session's traces retuned
+    // every other session sharing the proxy.
+    assertEquals(filters(traced.clientSaw), ['^stealth$:^Runtime\\..*$'])
+    assertEquals(filters(quiet.clientSaw), [])
+  } finally {
+    await traced.close()
+    await quiet.close()
   }
 })
 

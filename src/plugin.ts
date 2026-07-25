@@ -55,6 +55,7 @@ export function definePlugin<Options extends Record<string, unknown>>(
       priority: def.priority ?? 0,
       matches,
       match: def.match,
+      optional: def.optional,
       setup: (ctx: PluginContext) => def.setup(resolved, ctx),
     }
   }) as PluginFactory<Options>
@@ -94,6 +95,7 @@ export class Pipeline {
     debug: Debug = Debug.using(''),
   ): Promise<Pipeline> {
     const installed: InstalledPlugin[] = []
+    const failed: string[] = []
     for (const p of plugins) {
       try {
         const ctx = context(p.name)
@@ -105,10 +107,17 @@ export class Pipeline {
           ctx,
         })
       } catch (err) {
-        Logger.get(`plugin:${p.name}`).error('setup failed', {
-          error: asError(err),
-        })
+        const error = asError(err)
+        Logger.get(`plugin:${p.name}`).error('setup failed', { error })
+        if (!p.optional) failed.push(`${p.name} (${error.message})`)
       }
+    }
+    // A hook that throws on one message is recoverable, so those stay isolated.
+    // A plugin that never installed is not: the session would run on believing it
+    // is configured in a way it is not, which for stealth means quietly handing
+    // back a plain browser. Fail the session instead.
+    if (failed.length > 0) {
+      throw new Error(`plugin setup failed: ${failed.join(', ')}`)
     }
     installed.sort((a, b) => b.priority - a.priority)
 
@@ -126,6 +135,11 @@ export class Pipeline {
     return this.#plugins.length
   }
 
+  /** The plugins actually installed, in the order they run. */
+  get names(): string[] {
+    return this.#plugins.map((p) => p.name)
+  }
+
   async onRequest(msg: CDPRequest): Promise<RequestOutcome> {
     let current: CDPRequest = msg
     for (const p of this.#plugins) {
@@ -140,7 +154,17 @@ export class Pipeline {
       const outcome = run.value
       if (outcome === null) {
         this.#trace(p, 'onRequest', msg.method, 'drop')
-        return null
+        // Every CDP command has a client awaiting its id, so a refused command is
+        // answered rather than discarded. Discarding it hung the client until its
+        // own timeout, with nothing on the wire to explain why.
+        return {
+          respond: {
+            error: {
+              code: -32000,
+              message: `${msg.method} was refused by plugin "${p.name}"`,
+            },
+          },
+        }
       }
       if (outcome && typeof outcome === 'object' && 'respond' in outcome) {
         this.#trace(p, 'onRequest', msg.method, 'respond')
@@ -162,17 +186,19 @@ export class Pipeline {
 
   async onResponse(msg: CDPResponse): Promise<CDPResponse | null> {
     let current: CDPResponse = msg
+    const label = msg.method ?? `#${msg.id}`
     for (const p of this.#plugins) {
       if (!p.hooks.onResponse) continue
+      if (msg.method && !p.matches(msg.method)) continue
       const run = await this.#guard(
         p,
         'onResponse',
-        `#${msg.id}`,
+        label,
         () => p.hooks.onResponse!(current, p.ctx),
       )
       if (!run.ok) continue
       if (run.value === null) {
-        this.#trace(p, 'onResponse', `#${msg.id}`, 'drop')
+        this.#trace(p, 'onResponse', label, 'drop')
         return null
       }
       if (run.value) current = run.value

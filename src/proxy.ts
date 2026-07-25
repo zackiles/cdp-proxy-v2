@@ -120,8 +120,9 @@ export class Proxy {
   async register(
     plugins: ConfiguredPlugin[],
     isolation?: IsolationMode,
+    debug?: string,
   ): Promise<SessionToken> {
-    const token = this.#sessions.register(plugins, isolation)
+    const token = this.#sessions.register(plugins, isolation, debug)
     if (this.#sessions.resolve(token)?.isolation === 'browser') {
       await this.#pool.reserve(token)
     }
@@ -242,6 +243,7 @@ export class Proxy {
       connectionId,
       upstreamWsUrl: `ws://${browser}${path}`,
       plugins: record?.plugins ?? [],
+      debug: record?.debug,
       contextOwners,
       onClose: (id) => {
         const c = this.#connections.get(id)

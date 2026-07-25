@@ -35,10 +35,10 @@ export const recorder: PluginFactory<RecorderOptions> = definePlugin<
 >({
   name: 'recorder',
   defaults: { limit: 5_000, events: false },
+  // Only observes, so losing it costs visibility rather than correctness.
+  optional: true,
   setup(cfg) {
     const entries: Entry[] = []
-    // Responses carry no method, so remember what each command id asked for.
-    const methods = new Map<number, string>()
 
     const record = (entry: Entry) => {
       entries.push(entry)
@@ -50,7 +50,6 @@ export const recorder: PluginFactory<RecorderOptions> = definePlugin<
         if (msg.method === 'Proxy.history') {
           return { respond: { entries: [...entries] } }
         }
-        methods.set(msg.id, msg.method)
         record({
           direction: 'request',
           method: msg.method,
@@ -61,16 +60,12 @@ export const recorder: PluginFactory<RecorderOptions> = definePlugin<
       },
 
       onResponse(msg) {
-        const method = methods.get(msg.id)
-        if (method) {
-          methods.delete(msg.id)
-          record({
-            direction: 'response',
-            method,
-            at: Date.now(),
-            sessionId: msg.sessionId,
-          })
-        }
+        record({
+          direction: 'response',
+          method: msg.method ?? '',
+          at: Date.now(),
+          sessionId: msg.sessionId,
+        })
         return msg
       },
 
@@ -89,7 +84,6 @@ export const recorder: PluginFactory<RecorderOptions> = definePlugin<
       onSessionEnd(ctx) {
         ctx.log(`recorded ${entries.length} messages`)
         entries.length = 0
-        methods.clear()
       },
     }
   },
