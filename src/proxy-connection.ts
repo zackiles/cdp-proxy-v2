@@ -15,8 +15,12 @@ import type {
   CDPTarget,
   ConfiguredPlugin,
   ConnectionId,
+  Draw,
   InjectOptions,
+  LaunchSpec,
   PluginContext,
+  Profile,
+  Send,
   SessionId,
   SessionToken,
 } from './types.ts'
@@ -24,6 +28,13 @@ import { PROXY_METHOD_PREFIX } from './types.ts'
 import { Pipeline } from './plugin.ts'
 import { Logger } from './logger.ts'
 import { Debug } from './debug.ts'
+import { Ledger } from './coverage.ts'
+import { burn, draw, type Facts, reconcile, seal } from './profile.ts'
+import { compile, type Compiled } from './surface.ts'
+import { deliver } from './realms.ts'
+import { Broker } from './broker.ts'
+import { Actors } from './actor.ts'
+import { generate } from './core/generate.ts'
 import { asError } from './utils.ts'
 
 const CTX_SEND_TIMEOUT_MS = 30_000
@@ -35,6 +46,26 @@ export interface SessionSpec {
   connectionId: ConnectionId
   upstreamWsUrl: string
   plugins: ConfiguredPlugin[]
+  /**
+   * The candidate identity from the loader chain. Reconciled against this
+   * browser and sealed before any plugin is installed, so no plugin can read a
+   * field the process is about to contradict (§2.6).
+   */
+  profile?: Draw
+  /** The session's `surface` plugins, compiled once the profile is sealed (§4). */
+  surfaces?: ConfiguredPlugin[]
+  /** The `profile` chain, kept so `Proxy.burn` can withdraw the row (§2.7). */
+  loaders?: ConfiguredPlugin[]
+  /** The session's `actor` plugins, instantiated per page (§6). */
+  actors?: ConfiguredPlugin[]
+  /** How this session's own process was started, for the trace (§3.1). */
+  launch?: LaunchSpec
+  /** What the `launch` plugins read of the profile, resolved before this connection. */
+  reads?: Record<string, string[]>
+  /** What `onStart` already corrected about the candidate, for the trace (§3.2). */
+  corrections?: string[]
+  /** What the browser this connection landed on reported at `/json/version`. */
+  facts?: Facts
   /**
    * Trace filter for this session alone. Absent falls back to `CDP_DEBUG`, which
    * is what a standalone proxy uses; tracing one session must not retune every
@@ -71,6 +102,17 @@ interface PluginRequest extends Claimable {
   startedAt: number
 }
 
+/**
+ * The methods the runtime answers itself, declared the same way a plugin's are
+ * so `Proxy.hello` lists one set rather than two (§7.3).
+ */
+const RUNTIME_RPC = [
+  'Proxy.hello',
+  'Proxy.debug',
+  'Proxy.profile',
+  'Proxy.burn',
+] as const
+
 export class ProxyConnection {
   readonly connectionId: ConnectionId
   readonly sessionToken: SessionToken
@@ -91,13 +133,22 @@ export class ProxyConnection {
   readonly #contextOwners: Map<string, ConnectionId>
   /** CDP sessions belonging to another connection's targets; never forwarded. */
   readonly #foreignSessions = new Set<SessionId>()
-  /** Proxy-originated ids whose replies belong to nobody and must not be sent on. */
-  readonly #swallow = new Set<number>()
+  /**
+   * Proxy-originated ids whose replies belong to nobody and must not be sent on.
+   * The value reads the reply on its way to the bin, for the commands whose
+   * failure would otherwise be invisible.
+   */
+  readonly #swallow = new Map<number, (msg: CDPResponse) => void>()
   /** `ctx.state`, keyed by target first so a detach drops every plugin's at once. */
   readonly #state = new Map<SessionId, Map<string, unknown>>()
 
   readonly #abort = new AbortController()
   readonly #debug: Debug
+  readonly #broker: Broker
+  readonly #coverage = new Ledger()
+  #profile: Profile | undefined
+  #surfaces: Compiled | undefined
+  #actors: Actors | undefined
   #pipeline: Pipeline | undefined
   readonly #browserChains = new Map<string, Promise<void>>()
   readonly #clientChains = new Map<string, Promise<void>>()
@@ -121,14 +172,47 @@ export class ProxyConnection {
       : Debug.using(spec.debug, spec.sessionToken)
     this.#clientSocket = clientSocket
     this.#browserSocket = new WebSocket(spec.upstreamWsUrl)
+    this.#broker = new Broker({
+      send: this.#sender('broker'),
+      emit: (evt) => this.#sendToClient(JSON.stringify(evt)),
+      respond: (id, sessionId, result) =>
+        this.#respondToClient(id, sessionId, result as Record<string, unknown>),
+    }, this.#debug)
 
     this.#wireClient()
     this.#wireBrowser()
     this.#initDone = this.#init()
   }
 
-  /** Build the context for one plugin, with everything attributed to it by name. */
-  #ctx(plugin: string): PluginContext {
+  /**
+   * One plugin's view of the sealed identity, recording what it reads (§2.8).
+   *
+   * Installation happens after sealing, so the profile is always there by the
+   * time a plugin exists. The guard is for the one way that can stop being true:
+   * a caller building a pipeline without a profile at all, which would otherwise
+   * fail somewhere inside a `Proxy` handler rather than here.
+   */
+  #view(plugin: string): Profile {
+    if (!this.#profile) {
+      throw new Error(
+        `${plugin}: no profile was resolved for this session, so there is no ` +
+          'identity to read; a session with plugins must have a profile',
+      )
+    }
+    return this.#coverage.view(this.#profile, plugin)
+  }
+
+  /**
+   * A `send` attributed to one name, with the reply resolved to the caller and
+   * never leaked to the client.
+   *
+   * Separate from {@link #ctx} because the broker and the runtime's own traffic
+   * need to talk to the browser without being plugins: a full `PluginContext`
+   * reads the profile to build its recording view, which would attribute the
+   * runtime's reads to a plugin and fail outright on a session that has no
+   * identity to read (`plugins: 'none'`).
+   */
+  #sender(plugin: string): Send {
     const send = <M extends string>(
       method: M,
       params?: unknown,
@@ -179,6 +263,16 @@ export class ProxyConnection {
             this.#browserSocket.send(JSON.stringify(payload))
           }),
       )
+    return send as Send
+  }
+
+  /** Build the context for one plugin, with everything attributed to it by name. */
+  #ctx(plugin: string): PluginContext {
+    const send = this.#sender(plugin) as <M extends string>(
+      method: M,
+      params?: unknown,
+      sessionId?: SessionId,
+    ) => Promise<unknown>
 
     const emit = (method: string, params: unknown, sessionId?: SessionId) => {
       const evt: CDPEvent = {
@@ -232,6 +326,7 @@ export class ProxyConnection {
       connectionId: this.connectionId,
       targets: this.#targets,
       signal: this.#abort.signal,
+      profile: this.#view(plugin),
       // deno-lint-ignore no-explicit-any
       send: send as any,
       // deno-lint-ignore no-explicit-any
@@ -260,6 +355,12 @@ export class ProxyConnection {
       return
     }
     try {
+      if (this.#spec.launch) this.#debug.launched(this.#spec.launch)
+      if (this.#spec.reads) this.#coverage.adopt(this.#spec.reads)
+      await this.#sealProfile()
+      await this.#compileSurfaces()
+      if (this.#spec.launch?.auth) this.#broker.auth(this.#spec.launch.auth)
+      this.#installActors()
       this.#pipeline = await Pipeline.install(
         this.#spec.plugins,
         (plugin) => this.#ctx(plugin),
@@ -270,6 +371,145 @@ export class ProxyConnection {
       return
     }
     await this.#pipeline.onSessionStart()
+    if (this.#profile) this.#debug.profile(this.#profile, this.#coverage)
+  }
+
+  /**
+   * Correct the drawn identity against the browser that actually started, then
+   * freeze it (§2.6).
+   *
+   * The version is the case that matters: a page can feature-detect, so a profile
+   * claiming Chrome 148 on a 147 binary is caught by one missing API. No loader
+   * can know which binary the pool handed out, so the profile learns it here —
+   * before any plugin is installed, because a plugin that read the claim first
+   * would go on asserting a version the binary does not have.
+   *
+   * The facts come from the pool's `/json/version` discovery rather than from a
+   * `Browser.getVersion` of our own, which would put an extra round trip in front
+   * of every connection to learn something already known.
+   */
+  async #sealProfile(): Promise<void> {
+    // A session with plugins always has an identity: they read `ctx.profile`
+    // unconditionally, and the terminal loader exists so the answer is never
+    // "none". A caller that supplied no candidate gets the same answer the chain
+    // would have ended at. `plugins: 'none'` claims nothing and so has none.
+    const installed = this.#spec.plugins.length +
+      (this.#spec.surfaces?.length ?? 0) + (this.#spec.actors?.length ?? 0)
+    const candidate = this.#spec.profile ??
+      (installed > 0
+        ? await draw([generate()], {}, this.sessionToken)
+        : undefined)
+    if (!candidate) return
+
+    const { draw: corrected, corrections } = reconcile(
+      candidate,
+      this.#spec.facts ?? {},
+    )
+    this.#profile = seal(corrected)
+    for (const correction of this.#spec.corrections ?? []) {
+      this.#debug.reconciled(correction)
+    }
+    for (const correction of corrections) this.#debug.reconciled(correction)
+  }
+
+  /**
+   * Resolve the session's surfaces into one payload, after sealing so every
+   * surface reads a profile the browser has already agreed with.
+   */
+  async #compileSurfaces(): Promise<void> {
+    const surfaces = this.#spec.surfaces ?? []
+    if (surfaces.length === 0 || !this.#profile) return
+    this.#surfaces = await compile(
+      surfaces,
+      (name) => ({
+        profile: this.#view(name),
+        signal: this.#abort.signal,
+        log: (...args) =>
+          Logger.get(`plugin:${name}`).debug(args.map(String).join(' ')),
+      }),
+      this.#profile,
+      this.#debug,
+    )
+    this.#debug.surfaces(this.#surfaces.names)
+    // Headers leave the surface layer here and become the broker's, so a client
+    // that sets its own on the same session merges with them rather than
+    // replacing them (§7.2).
+    this.#broker.headers('surfaces', this.#surfaces.headers)
+    // So does the display: the client's own viewport call is whole-state, and the
+    // broker is what folds the monitor back into it (§7.2).
+    this.#broker.display('surfaces', this.#surfaces.display)
+    // Every realm a surface still claims beyond the document tree needs the
+    // target paused at start, which is a browser-wide setting the client also
+    // uses (§7.1).
+    if (this.#surfaces.realms.some((r) => r !== 'page' && r !== 'iframe')) {
+      this.#broker.pause()
+    }
+  }
+
+  /**
+   * Stand up the session's actors (§6).
+   *
+   * Nothing is instantiated here: an actor's lifetime is one page, so the
+   * instances arrive with the pages. What this builds is the scheduler they run
+   * on, which is deliberately not the transport's — the whole point of the kind
+   * is that an actor awaiting a solver for ten seconds does not stop the page's
+   * CDP traffic (§6.1).
+   */
+  #installActors(): void {
+    const actors = this.#spec.actors ?? []
+    const profile = this.#profile
+    if (actors.length === 0 || !profile) return
+    this.#actors = new Actors(actors, (target) => ({
+      // Named per page rather than per plugin, because the handle is what sends
+      // and a trace that said `actor` would not say which page it acted on.
+      send: this.#sender(`actor@${target.sessionId.slice(0, 6)}`),
+      profile: this.#coverage.view(profile, 'actors'),
+      signal: this.#abort.signal,
+    }), this.#debug)
+  }
+
+  /** Install the compiled surfaces on a target as it attaches (§4.5). */
+  async #deliverSurfaces(target: CDPTarget): Promise<void> {
+    if (!this.#surfaces) return
+    const wire = this.#ctx('surfaces')
+    await deliver(this.#surfaces, target, {
+      inject: (source, sessionId) =>
+        wire.inject(source, sessionId, { immediately: true }),
+      send: wire.send,
+      evaluate: (source, sessionId) => {
+        const id = this.#nextId++
+        // The reply cannot be awaited (see `Wire.evaluate`), and dropping it
+        // unread is what made a worker the one realm where a broken bundle
+        // installed nothing and said nothing. Read on the way past instead.
+        this.#swallow.set(id, (msg) => {
+          const thrown = (msg.result as {
+            exceptionDetails?: { exception?: { description?: string } }
+          })?.exceptionDetails
+          const failed = msg.error?.message ??
+            thrown?.exception?.description?.split('\n')[0]
+          if (!failed) return
+          wire.log(`${target.type} bundle failed: ${failed}`)
+          // Recorded as well as logged, because this is the one delivery whose
+          // failure nothing else can report: `Proxy.debug` is where a test or an
+          // author finds out that a realm went unpatched.
+          this.#debug.conflict(
+            `the surface bundle failed in a ${target.type}: ${failed}`,
+          )
+        })
+        this.#debug.trace(
+          'surfaces',
+          'Runtime.evaluate',
+          `⇢ surfaces bundle → ${target.type} @${sessionId.slice(0, 6)}`,
+        )
+        this.#sendToBrowser(JSON.stringify({
+          id,
+          method: 'Runtime.evaluate',
+          params: { expression: source, silent: true },
+          sessionId,
+        }))
+      },
+      log: (text) => wire.log(text),
+    })
   }
 
   /**
@@ -327,7 +567,7 @@ export class ProxyConnection {
           },
       )
     }
-    this.#clientSocket.onclose = () => this.#reap('client socket closed')
+    this.#clientSocket.onclose = () => this.#reap('client socket closed', true)
     this.#clientSocket.onerror = () => {
       /* close will follow */
     }
@@ -365,6 +605,11 @@ export class ProxyConnection {
       return
     }
 
+    // After the pipeline, so a `protocol` plugin can still rewrite a brokered
+    // command before it is merged, and before the wire, so the merge is what
+    // actually goes out (§7.2).
+    if (await this.#broker.request(req)) return
+
     const clientId = req.id
     const proxyId = this.#nextId++
     this.#clientRequests.set(proxyId, {
@@ -373,6 +618,7 @@ export class ProxyConnection {
       context: req.params?.browserContextId as string | undefined,
     })
     req.id = proxyId
+    this.#debug.forwarded(req.method)
     this.#debug.trace(
       'proxy',
       req.method,
@@ -412,7 +658,12 @@ export class ProxyConnection {
         entry.settle(msg)
         return
       }
-      if (typeof msg.id === 'number' && this.#swallow.delete(msg.id)) return
+      if (typeof msg.id === 'number' && this.#swallow.has(msg.id)) {
+        const read = this.#swallow.get(msg.id)!
+        this.#swallow.delete(msg.id)
+        read(msg)
+        return
+      }
       this.#order(
         this.#browserChains,
         msg.sessionId,
@@ -461,8 +712,17 @@ export class ProxyConnection {
       msg.method,
       `← ${msg.method}${this.#session(msg.sessionId)}`,
     )
+    // Before the pipeline: an auth challenge the client never asked for, or a
+    // request paused only so the broker could see it, is the broker's own
+    // traffic and no plugin should have to learn to ignore it (§7.2).
+    if (await this.#broker.event(msg)) return
     await this.#derive(msg, pipeline)
     const out = await pipeline.onEvent(msg)
+    // After the pipeline has decided, and observe-only: `cdp()` hands an actor a
+    // copy of what already happened, so it cannot suppress or rewrite anything
+    // (§6.4). A suppressed event is still delivered, because the actor asked to
+    // watch the session rather than to watch the client.
+    this.#actors?.event(msg)
     if (out === null) return
     this.#sendToClient(JSON.stringify(out))
   }
@@ -535,7 +795,7 @@ export class ProxyConnection {
       // means one session deciding when another session's page starts running,
       // and the owner wanted that pause to inject before any page script does.
       const detach = this.#nextId++
-      this.#swallow.add(detach)
+      this.#swallow.set(detach, () => {})
       this.#sendToBrowser(JSON.stringify({
         id: detach,
         method: 'Target.detachFromTarget',
@@ -576,6 +836,12 @@ export class ProxyConnection {
         | { id: string; loaderId: string; url: string; parentId?: string }
         | undefined
       if (frame) {
+        if (!frame.parentId) {
+          // The last moment the client can still be said not to want a viewport,
+          // which is what decides whether the broker claims the display itself
+          // (§7.2).
+          await this.#broker.document(evt.sessionId)
+        }
         await pipeline.onDocument({
           sessionId: evt.sessionId,
           frameId: frame.id,
@@ -583,6 +849,9 @@ export class ProxyConnection {
           url: frame.url,
           isMain: !frame.parentId,
         })
+        // Not awaited: an actor's whole reason to be a kind is that it runs off
+        // this queue, so handing it the document must not block the event (§6.1).
+        this.#actors?.document(evt.sessionId, frame.url, !frame.parentId)
       }
     } else if (evt.method === 'Target.attachedToTarget') {
       const info = params.targetInfo as Record<string, string> | undefined
@@ -595,11 +864,34 @@ export class ProxyConnection {
           browserContextId: info.browserContextId,
         }
         this.#targets.set(sessionId, target)
+        this.#actors?.attached(target)
         await pipeline.onTargetAttached(target)
+        // A worker that is not waiting for the debugger was already running when
+        // this session arrived — a service worker from a persisted registration,
+        // typically — so the bundle reaches its globals only in time for the next
+        // handler, not for the code that already ran. Nothing can fix that from
+        // here; it is said out loud instead of being silently half true.
+        if (
+          params.waitingForDebugger === false &&
+          (info.type === 'service_worker' || info.type === 'shared_worker')
+        ) {
+          this.#debug.conflict(
+            `the ${info.type} at ${info.url ?? info.targetId} was already ` +
+              'running: its own code ran before the surface bundle did',
+          )
+        }
+        await this.#deliverSurfaces(target)
+        await this.#broker.attach(target)
+        // Last, and only for a target the client did not ask to pause: the
+        // bundle is already in by here, so releasing it is safe, and a target
+        // the client paused is the client's to release (§7.1).
+        await this.#broker.resume(sessionId, evt.sessionId)
       }
     } else if (evt.method === 'Target.detachedFromTarget') {
       const sessionId = params.sessionId as string | undefined
       if (sessionId) {
+        this.#broker.detach(sessionId)
+        this.#actors?.detached(sessionId)
         const target = this.#targets.get(sessionId)
         if (target) {
           this.#targets.delete(sessionId)
@@ -611,7 +903,7 @@ export class ProxyConnection {
     }
   }
 
-  // ─── custom RPC (§6.5) ──────────────────────────────────────────────────────
+  // ─── declared RPC (§7.3) ────────────────────────────────────────────────────
   #answerProxyMethod(req: CDPRequest): void {
     if (req.method === 'Proxy.hello') {
       this.#respondToClient(req.id, req.sessionId, {
@@ -623,6 +915,9 @@ export class ProxyConnection {
         // Which browser this session landed on — the answer to "is my pooled or
         // per-site isolation actually doing anything?".
         upstream: new URL(this.#spec.upstreamWsUrl).host,
+        // The point of declaring rather than string-matching: a custom method
+        // is discoverable instead of being folklore in a plugin's README (§7.3).
+        rpc: [...RUNTIME_RPC, ...this.#pipeline?.rpc ?? []],
       })
       return
     }
@@ -630,9 +925,53 @@ export class ProxyConnection {
       this.#respondToClient(req.id, req.sessionId, this.#debug.snapshot())
       return
     }
-    this.#respondToClient(req.id, req.sessionId, {
-      error: { code: -32601, message: `Unknown proxy method: ${req.method}` },
-    })
+    if (req.method === 'Proxy.profile') {
+      // The raw row, not a recording view: answering this must not make the
+      // runtime look like a plugin that read every field.
+      const profile = this.#profile
+      this.#respondToClient(req.id, req.sessionId, {
+        profile: profile ? { ...profile, noise: undefined } : null,
+        coverage: profile ? this.#coverage.report(profile) : null,
+      })
+      return
+    }
+    if (req.method === 'Proxy.burn') {
+      // Retiring an identity is the automator's call, not the runtime's: only
+      // the code driving the page knows a block when it sees one (§2.7).
+      const profile = this.#profile
+      const reason = (req.params as { reason?: string })?.reason ??
+        'unspecified'
+      if (!profile) {
+        this.#respondToClient(req.id, req.sessionId, { burnt: false, told: [] })
+        return
+      }
+      burn(
+        this.#spec.loaders ?? [],
+        profile.id,
+        reason,
+        profile.seed,
+        this.#abort.signal,
+      ).then((told) =>
+        this.#respondToClient(req.id, req.sessionId, { burnt: true, told })
+      )
+      return
+    }
+    // Declared last, so the runtime's four cannot be taken over by a plugin.
+    this.#pipeline?.answer(req.method, req.params ?? {}).then((answer) =>
+      this.#respondToClient(
+        req.id,
+        req.sessionId,
+        answer ?? {
+          error: {
+            code: -32601,
+            message: `Unknown proxy method: ${req.method}. This session ` +
+              `answers ${
+                [...RUNTIME_RPC, ...this.#pipeline?.rpc ?? []].join(', ')
+              }`,
+          },
+        },
+      )
+    )
   }
 
   // ─── helpers ────────────────────────────────────────────────────────────────
@@ -665,7 +1004,8 @@ export class ProxyConnection {
     }
   }
 
-  async #reap(reason: string): Promise<void> {
+  /** `asked` is whether somebody asked for this, rather than something failing. */
+  async #reap(reason: string, asked = false): Promise<void> {
     if (this.#reaped) return
     this.#reaped = true
     log.debug(`${this.connectionId.slice(0, 8)} reaped: ${reason}`)
@@ -674,8 +1014,10 @@ export class ProxyConnection {
     // rejection is teardown rather than a genuine failure.
     this.#abort.abort(new Error(reason))
 
-    // A command still in flight at teardown usually means a plugin is awaiting
-    // something that will never arrive, so name them before they are settled.
+    // A command still in flight when something *failed* is usually the reason it
+    // failed, so name them before they are settled. On a disconnect somebody
+    // asked for it is just the shape of a disconnect, and the summary keeps it to
+    // the trace.
     const outstanding = [...this.#pluginRequests.values()].map((e) => ({
       plugin: e.plugin,
       method: e.method,
@@ -702,7 +1044,7 @@ export class ProxyConnection {
     }
     this.#state.clear()
     // After onSessionEnd so its own cost is accounted for.
-    this.#debug.summary(outstanding)
+    this.#debug.summary(outstanding, asked)
     try {
       if (this.#clientSocket.readyState === WebSocket.OPEN) {
         this.#clientSocket.close(1000, reason.slice(0, 120))
@@ -719,6 +1061,6 @@ export class ProxyConnection {
 
   /** Closable — invoked by the shutdown manager. */
   close(): Promise<void> {
-    return this.#reap('shutdown')
+    return this.#reap('shutdown', true)
   }
 }

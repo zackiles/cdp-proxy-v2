@@ -7,11 +7,33 @@
  * `sessionId` and proxy `connectionId`.
  */
 
-import type { ConfiguredPlugin, IsolationMode, SessionToken } from './types.ts'
+import type {
+  Constraint,
+  Draw,
+  IsolationMode,
+  LaunchSpec,
+  PluginSet,
+  SessionToken,
+} from './types.ts'
 
 export interface SessionRecord {
   token: SessionToken
-  plugins: ConfiguredPlugin[]
+  /** The session's plugin set, already flattened and grouped by kind. */
+  plugins: PluginSet
+  /**
+   * The identity the loader chain drew for this session, still a candidate: it
+   * is reconciled against the browser that actually starts and sealed at the
+   * connection (§2.6). Absent for `plugins: 'none'`, which claims nothing.
+   */
+  profile?: Draw
+  /** What was asked of the loaders, kept for the trace and for pool matching. */
+  constraint: Constraint
+  /** How the session's own process was started; absent on a pooled slot (§3.3). */
+  launch?: LaunchSpec
+  /** Profile fields the `launch` plugins read, for the coverage report (§2.8). */
+  reads?: Record<string, string[]>
+  /** What `onStart` corrected about the drawn identity, for the trace (§3.2). */
+  corrections: string[]
   isolation: IsolationMode
   /** Trace filter for this session only; falls back to `CDP_DEBUG` when absent. */
   debug?: string
@@ -24,6 +46,11 @@ export interface SessionManagerOptions {
   maxConcurrent?: number
   /** How long an issued token stays usable before its first connection. */
   tokenTtlMs?: number
+  /**
+   * A session went away: expired without ever connecting, or its last
+   * connection closed. Whatever was reserved for it is now nobody's.
+   */
+  onRelease?: (token: SessionToken) => void
 }
 
 export class SessionManager {
@@ -31,12 +58,27 @@ export class SessionManager {
   readonly #defaultIsolation: IsolationMode
   readonly #maxConcurrent: number
   readonly #tokenTtlMs: number
+  readonly #onRelease?: (token: SessionToken) => void
   #active = 0
 
   constructor(options: SessionManagerOptions) {
     this.#defaultIsolation = options.defaultIsolation
     this.#maxConcurrent = options.maxConcurrent ?? 100
     this.#tokenTtlMs = options.tokenTtlMs ?? 5 * 60_000
+    this.#onRelease = options.onRelease
+  }
+
+  /**
+   * Drop a session and tell whoever is holding resources for it.
+   *
+   * DANGER: registering can start a browser process — an isolated session gets
+   * one before its client's first message, deliberately (§3.3). Forgetting the
+   * record without saying so leaves that process running for the life of the
+   * proxy, which is how a fleet ends up with more Chromes than sessions.
+   */
+  #forget(rec: SessionRecord): void {
+    this.#sessions.delete(rec.token)
+    this.#onRelease?.(rec.token)
   }
 
   /**
@@ -45,18 +87,22 @@ export class SessionManager {
    * that registers and then dies cannot leak plugin sets into the registry.
    */
   register(
-    plugins: ConfiguredPlugin[],
+    plugins: PluginSet,
     isolation: IsolationMode = this.#defaultIsolation,
     debug?: string,
+    identity: { profile?: Draw; constraint?: Constraint } = {},
   ): SessionToken {
     for (const rec of this.#sessions.values()) {
-      if (this.#expired(rec)) this.#sessions.delete(rec.token)
+      if (this.#expired(rec)) this.#forget(rec)
     }
 
     const token = crypto.randomUUID()
     this.#sessions.set(token, {
       token,
       plugins,
+      profile: identity.profile,
+      constraint: identity.constraint ?? {},
+      corrections: [],
       isolation,
       debug,
       createdAt: Date.now(),
@@ -69,7 +115,7 @@ export class SessionManager {
     const rec = token ? this.#sessions.get(token) : undefined
     if (!rec) return undefined
     if (this.#expired(rec)) {
-      this.#sessions.delete(rec.token)
+      this.#forget(rec)
       return undefined
     }
     return rec
@@ -90,7 +136,7 @@ export class SessionManager {
     if (!rec) return
     this.#active = Math.max(0, this.#active - 1)
     rec.connections = Math.max(0, rec.connections - 1)
-    if (rec.connections === 0) this.#sessions.delete(rec.token)
+    if (rec.connections === 0) this.#forget(rec)
   }
 
   #expired(rec: SessionRecord): boolean {

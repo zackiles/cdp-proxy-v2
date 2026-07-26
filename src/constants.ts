@@ -42,42 +42,11 @@ const CDP_WEBSOCKET_PATHS = [
 ] as const
 
 /**
- * User configurable flags used by the proxy to launch the browser.
- * Most browser flags are available to be configured except for a few reserved flags the proxy
- * or chrome-launcher needs to launch and control the browser.
- *
- * Flag Types:
- * 1. Default Flags: Set by proxy/chrome-launcher. Can be overridden by User Configurable flags
- * 2. Reserved Flags: Set internally, cannot be overridden. Will throw runtime error if provided
- * 3. User Configurable Flags: Override Default Flags when specified
- *
- * NOTE: Final browser launch flags may vary due to browser runtime behavior and flag interactions.
- * @see {@link docs/chromium-launch-flags.json} for available Chromium flags
- * @see {@link browser-manager.ts#simulateFinalLaunchFlags} for launch flag simulation
+ * The baseline launch flags live in `src/core/flags.ts` (§8.3), and the reserved
+ * and warn lists that used to be documented here are enforced in `src/launch.ts`
+ * (§3.1). What was three tiers of prose and one tier of code is now one plugin,
+ * pinned first, and one merge.
  */
-const BROWSER_LAUNCH_FLAGS = [
-  '--no-default-browser-check', // Skip default browser check
-  '--no-first-run', // Skip first run wizards
-  // DANGER: do not add --disable-gpu. It leaves the page with no WebGL context at
-  // all, and every real Chrome has one — checking `!!canvas.getContext('webgl')`
-  // is a one-line headless test. ANGLE over SwiftShader gives a working context
-  // without needing a GPU, so it holds up in a container too, and the unsafe flag
-  // is what lifts Chrome's own block on software WebGL.
-  '--use-gl=angle',
-  '--enable-unsafe-swiftshader',
-  '--no-sandbox', // Disable sandbox security feature
-  '--enable-features=NetworkService,NetworkServiceInProcess', // Enable required network features
-  '--allow-pre-commit-input', // Allow input before commit
-  '--disable-background-networking', // Disable background network tasks
-  '--disable-default-apps', // Disable installation of default apps
-  '--disable-extensions', // Disable browser extensions
-  '--disable-sync', // Disable browser sync features
-  '--password-store=basic', // Use basic password store
-] as const
-
-// DANGER: --enable-automation is intentionally omitted. It sets
-// navigator.webdriver=true and shows the automation infobar, both of which are
-// stealth tells that defeat the product's core purpose.
 
 /** Appended only when running headless; kept conditional per §0.1.3 / §9. */
 const HEADLESS_FLAG = '--headless=new'
@@ -121,7 +90,6 @@ const PROXY_TO_LAUNCHER_LOG_LEVEL: Record<ProxyLogLevel, LauncherLogLevel> = {
 } as const
 
 export {
-  BROWSER_LAUNCH_FLAGS,
   CDP_HTTP_PATHS,
   CDP_HTTP_PATHS_TO_REWRITE,
   CDP_WEBSOCKET_PATHS,

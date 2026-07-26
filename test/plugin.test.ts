@@ -275,6 +275,62 @@ Deno.test('Pipeline drives lifecycle and target hooks', async () => {
   assertEquals(calls, ['start', 'attach:t', 'detach:t', 'end'])
 })
 
+Deno.test('a declared method is answered by the plugin that declared it', async () => {
+  const plugin = definePlugin({
+    name: 'history',
+    // The glob is the point: a declared method bypasses `match`, which is the
+    // trap the declaration replaces (§7.3).
+    match: ['Page.*'],
+    setup: () => ({
+      rpc: {
+        'Proxy.history': (params: Record<string, unknown>) => ({
+          entries: [params.url],
+        }),
+      },
+    }),
+  })()
+
+  const { pipe } = await pipeline([plugin])
+  assertEquals(pipe.rpc, ['Proxy.history'])
+  assertEquals(await pipe.answer('Proxy.history', { url: '/a' }), {
+    entries: ['/a'],
+  })
+  assertEquals(await pipe.answer('Proxy.nobody', {}), undefined)
+})
+
+Deno.test('two plugins declaring one method fail the session at install', async () => {
+  const claim = (name: string) =>
+    definePlugin({
+      name,
+      setup: () => ({ rpc: { 'Proxy.history': () => ({}) } }),
+    })()
+
+  await assertRejects(
+    () => pipeline([claim('first'), claim('second')]),
+    Error,
+    'both declare Proxy.history',
+  )
+})
+
+Deno.test('a declared method that throws answers an error, not a hang', async () => {
+  const plugin = definePlugin({
+    name: 'brittle',
+    setup: () => ({
+      rpc: {
+        'Proxy.brittle': () => {
+          throw new Error('nope')
+        },
+      },
+    }),
+  })()
+
+  const { pipe } = await pipeline([plugin])
+  const answer = await pipe.answer('Proxy.brittle', {}) as {
+    error: { message: string }
+  }
+  assertEquals(answer.error.message, 'brittle failed to answer Proxy.brittle')
+})
+
 Deno.test('plugin setup receives resolved options and a usable context', async () => {
   let received: unknown
   const plugin = definePlugin<{ mode: string }>({

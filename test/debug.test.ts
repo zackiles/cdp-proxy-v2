@@ -84,7 +84,7 @@ Deno.test('the install report names order, priority, hooks and globs', async () 
   })
 
   const report = lines.join('\n')
-  assertStringIncludes(report, 'pipeline: high(90) → low(1)')
+  assertStringIncludes(report, 'pipeline protocol: high(90) → low(1)')
   assertStringIncludes(report, 'high hooks=onRequest match=Runtime.*')
   assertStringIncludes(report, 'low hooks=onEvent match=*')
 })

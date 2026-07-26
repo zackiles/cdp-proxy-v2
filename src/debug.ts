@@ -26,6 +26,9 @@
 
 import { Config } from './config.ts'
 import { Logger } from './logger.ts'
+import { describe } from './profile.ts'
+import type { Ledger } from './coverage.ts'
+import type { LaunchSpec, Profile } from './types.ts'
 
 const log = Logger.get('trace', { level: 'debug' })
 
@@ -35,11 +38,26 @@ export type Outcome = 'pass' | 'change' | 'drop' | 'respond' | 'error'
 /** A plugin as the pipeline resolved it, for the install report and warnings. */
 export interface Installed {
   name: string
+  kind: string
   priority: number
+  /** Which end of its kind's order core holds; absent for authored plugins. */
+  pinned?: 'first' | 'last'
   /** Declared method globs, if the plugin narrowed what it sees. */
   match?: string[]
   /** Names of the hooks the plugin actually implements. */
   hooks: string[]
+}
+
+/** An actor and whether it is on a page, for `Proxy.debug` (§6.3). */
+export interface Watching {
+  name: string
+  /** `idle` until a page matches, then `watching`, or `failed` if setup threw. */
+  state: 'idle' | 'watching' | 'failed'
+  /** The globs it declared, which is what to check when it stays idle. */
+  urls?: string[]
+  /** The page it took, or tried to. */
+  url?: string
+  reason?: string
 }
 
 const MESSAGE_HOOKS = ['onRequest', 'onResponse', 'onEvent']
@@ -62,7 +80,14 @@ export class Debug {
   readonly #session: string
   /** `plugin` → `hook` → [invocations, total ms]. */
   readonly #counts = new Map<string, Map<string, [number, number]>>()
+  /** CDP method → how many times it actually crossed to the browser. */
+  readonly #forwarded = new Map<string, number>()
+  readonly #conflicts: string[] = []
+  readonly #corrections: string[] = []
+  readonly #actors = new Map<string, Watching>()
   #installed: Installed[] = []
+  #surfaces: string[] = []
+  #launch: LaunchSpec = { flags: [], env: {}, extensions: [], conflicts: [] }
 
   private constructor(spec: string, sessionToken: string) {
     this.#session = sessionToken.slice(0, 8)
@@ -103,11 +128,7 @@ export class Debug {
   installed(plugins: Installed[]): void {
     this.#installed = plugins
     if (!this.enabled) return
-    this.#write(
-      `pipeline: ${
-        plugins.map((p) => `${p.name}(${p.priority})`).join(' → ') || 'empty'
-      }`,
-    )
+    this.pipeline('protocol', plugins)
     for (const p of plugins) {
       this.#write(
         `  ${p.name} hooks=${p.hooks.join(',') || 'none'} match=${
@@ -115,6 +136,111 @@ export class Debug {
         }`,
       )
     }
+  }
+
+  /**
+   * One kind's resolved order (§9.5). `*` marks a core plugin, shown at its
+   * pinned end rather than with a priority, because it does not have one to
+   * compare against.
+   */
+  pipeline(kind: string, plugins: Installed[]): void {
+    if (!this.enabled) return
+    const label = (p: Installed) =>
+      p.pinned ? `${p.name}*` : `${p.name}(${p.priority})`
+    this.#write(
+      `pipeline ${kind}: ${plugins.map(label).join(' → ') || 'empty'}`,
+    )
+  }
+
+  /**
+   * The identity this session presents and who is carrying which part of it
+   * (§2.8). The uncovered line is the one to read: a field nothing claimed is a
+   * field where the real browser's value reaches the page, contradicting
+   * everything the profile does claim.
+   */
+  profile(profile: Profile, coverage: Ledger): void {
+    if (!this.enabled) return
+    this.#write(`profile ${describe(profile)}`)
+    for (const line of coverage.lines(profile)) this.#write(line)
+  }
+
+  /**
+   * The surfaces that compiled, in delivery order. Reported separately from the
+   * protocol pipeline because surfaces resolve once per session and then only
+   * ever run in the page, where no trace line can reach them.
+   */
+  surfaces(names: string[]): void {
+    this.#surfaces = names
+    if (!this.enabled) return
+    this.#write(`pipeline surface: ${names.join(' → ') || 'empty'}`)
+  }
+
+  /**
+   * The actors this session configured, before any of them has seen a page.
+   *
+   * Registered up front so an actor that never matched anything is visible as
+   * `idle` rather than absent — "my banner-dismisser did nothing" and "my
+   * banner-dismisser was never installed" look identical from the client, and
+   * they have different fixes (§6.3).
+   */
+  actors(plugins: { name: string; urls?: string[] }[]): void {
+    for (const p of plugins) {
+      this.#actors.set(p.name, { name: p.name, urls: p.urls, state: 'idle' })
+    }
+    if (!this.enabled) return
+    this.#write(
+      `pipeline actor: ${plugins.map((p) => p.name).join(' → ') || 'empty'}`,
+    )
+  }
+
+  /** An actor took a page, or failed trying. */
+  actor(name: string, url: string, failed?: string): void {
+    const held = this.#actors.get(name)
+    this.#actors.set(name, {
+      name,
+      urls: held?.urls,
+      url,
+      state: failed ? 'failed' : 'watching',
+      reason: failed,
+    })
+    if (!this.enabled) return
+    this.#write(
+      failed
+        ? `actor ${name} failed on ${url}: ${failed}`
+        : `actor ${name} took ${url}`,
+    )
+  }
+
+  /** How the process was started (§3.1), which no later trace can recover. */
+  launched(spec: LaunchSpec): void {
+    this.#launch = spec
+    if (!this.enabled) return
+    this.#write(`launch ${spec.flags.join(' ')}`)
+    for (const [key, value] of Object.entries(spec.env)) {
+      this.#write(`  env ${key}=${value}`)
+    }
+  }
+
+  /** A field the running browser corrected, which is always worth seeing (§2.6). */
+  reconciled(text: string): void {
+    this.#corrections.push(text)
+    if (this.enabled) this.#write(`  reconciled ${text}`)
+  }
+
+  /**
+   * A resolution that had to pick a winner — a clobbered launch flag, a header
+   * two surfaces both contributed. Recorded whether or not tracing is on, so
+   * `Proxy.debug` can answer for it either way.
+   */
+  conflict(text: string): void {
+    this.#conflicts.push(text)
+    if (this.enabled) this.#write(`conflict  ${text}`)
+  }
+
+  /** A command that actually reached the browser, which is the wire-level fact. */
+  forwarded(method: string): void {
+    if (!this.enabled) return
+    this.#forwarded.set(method, (this.#forwarded.get(method) ?? 0) + 1)
   }
 
   /** One trace line, if this source and method are in scope. */
@@ -140,8 +266,16 @@ export class Debug {
    * Close the session out: per-plugin totals when tracing, plus the warnings that
    * are worth raising either way — a plugin that never matched, and commands a
    * plugin was still waiting on when the session went away.
+   *
+   * `clean` is whether the session ended because somebody asked it to. A command
+   * in flight when a client disconnects is the ordinary shape of a disconnect and
+   * not worth a warning; the same list when the upstream died is the most useful
+   * line in the log.
    */
-  summary(outstanding: { plugin: string; method: string }[]): void {
+  summary(
+    outstanding: { plugin: string; method: string }[],
+    clean = false,
+  ): void {
     for (const p of this.#installed) {
       const hooks = this.#counts.get(p.name)
       const ran = MESSAGE_HOOKS.some((h) => hooks?.has(h))
@@ -155,10 +289,21 @@ export class Debug {
       }
     }
 
+    for (const actor of this.#actors.values()) {
+      if (actor.state === 'idle' && actor.urls?.length) {
+        log.warn(
+          `[${this.#session}] ${actor.name} declared urls=${
+            actor.urls.join(',')
+          } but no page ever matched — check the globs`,
+        )
+      }
+    }
+
     for (const { plugin, method } of outstanding) {
-      log.warn(
-        `[${this.#session}] ${plugin} was still awaiting ${method} when the session ended`,
-      )
+      const text =
+        `${plugin} was still awaiting ${method} when the session ended`
+      if (clean) this.#write(text)
+      else log.warn(`[${this.#session}] ${text}`)
     }
 
     if (!this.enabled) return
@@ -180,12 +325,40 @@ export class Debug {
    */
   snapshot(): {
     tracing: string[]
+    /**
+     * Which commands reached the browser, and how often. Only populated while
+     * tracing, because an unbounded map on the hot path of a long-lived
+     * connection is a leak rather than a diagnostic.
+     */
+    forwarded: Record<string, number>
+    conflicts: string[]
+    /** What the running browser corrected about the drawn identity (§2.6). */
+    reconciled: string[]
+    /** The surfaces that compiled, in delivery order (§4.2). */
+    surfaces: string[]
+    /** Every configured actor and whether it is on a page (§6.3). */
+    actors: Watching[]
+    /**
+     * The merge the process was started from (§3.1): flags, environment, data
+     * dir, and the conflicts resolving them reported.
+     */
+    launch: LaunchSpec
     plugins: (Installed & { calls: Record<string, number> })[]
   } {
     return {
       tracing: this.#filters.map((f) =>
         `${f.source.source}:${f.method.source}`
       ),
+      forwarded: Object.fromEntries(this.#forwarded),
+      conflicts: [...this.#conflicts],
+      reconciled: [...this.#corrections],
+      surfaces: [...this.#surfaces],
+      actors: [...this.#actors.values()],
+      launch: {
+        ...this.#launch,
+        flags: [...this.#launch.flags],
+        conflicts: [...this.#launch.conflicts],
+      },
       plugins: this.#installed.map((p) => ({
         ...p,
         calls: Object.fromEntries(

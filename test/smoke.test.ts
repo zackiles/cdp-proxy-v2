@@ -2,20 +2,28 @@
  * End-to-end smoke test: the real SDK, the real proxy, a real browser.
  *
  * It pins the three properties the project exists for:
- *  1. with no plugins the proxy is transparent — stock Playwright still works;
- *  2. with `stealth()`, Playwright's `Runtime.enable` never reaches the browser,
+ *  1. with `plugins: 'none'` the proxy is transparent — stock Playwright still
+ *     works, and this is the only configuration that is a plain relay now that
+ *     `plugins: []` means core-only (§8.6);
+ *  2. core's `contexts` stops Playwright's `Runtime.enable` reaching the browser,
  *     yet every Playwright API that depends on execution contexts (main world,
  *     utility world, navigation, setContent, clicking) keeps working;
  *  3. a real third-party detector grades the result as a human browser.
  */
 
-import { assert, assertEquals, assertStringIncludes } from '@std/assert'
+import {
+  assert,
+  assertEquals,
+  assertNotEquals,
+  assertStringIncludes,
+} from '@std/assert'
 import { Config } from '../src/config.ts'
 import { chromium, rpc, shutdown } from '../src/sdk.ts'
 import { definePlugin } from '../src/plugin.ts'
 import { stealth } from '../plugins/stealth.ts'
-import { type Entry, recorder } from '../plugins/recorder.ts'
-import type { ConfiguredPlugin } from '../src/types.ts'
+import { clock } from '../plugins/launch/clock.ts'
+import { type Entry, recorder } from '../plugins/protocol/recorder.ts'
+import type { PluginList } from '../src/types.ts'
 import type { Browser } from 'playwright'
 
 /** Third-party bot detector; the only assertion here that leaves the machine. */
@@ -28,19 +36,25 @@ const PAGE = `<!doctype html>
 </body></html>`
 
 /**
- * Taps the CDP requests crossing the pipeline. Installed at two priorities so
- * a test can compare what the client *asked* for against what was *forwarded*:
- * a plugin that answers a request short-circuits everything below it.
+ * Taps the CDP requests crossing the pipeline, to prove one session's plugins do
+ * not see another's traffic.
+ *
+ * IMPORTANT: a tap cannot be used to observe `Runtime.enable` any more. Core's
+ * `contexts` is pinned first and answers it with `{ respond }`, which
+ * short-circuits, so no authored plugin at any priority ever sees that command
+ * (§8.4). What reached the browser is asked of the transport instead, via
+ * `Proxy.debug`'s `forwarded` counters.
  *
  * IMPORTANT: do not assert the `Runtime.enable` tell from inside the page. On
  * Chrome 147 no page-visible probe distinguishes the domain being enabled —
  * console previews no longer invoke accessors or proxy traps, and headless
  * Chrome stringifies console arguments for its own log sink either way (verified
  * against a raw CDP session with `Runtime.enable` as a positive control). The
- * wire-level invariant below is the property this plugin actually guarantees.
+ * wire-level invariant below is the property core actually guarantees.
  */
 function tap(log: string[], priority: number) {
   return definePlugin({
+    kind: 'protocol',
     name: `tap-${priority}`,
     priority,
     setup: () => ({
@@ -137,58 +151,192 @@ Deno.test({
     let plain: Browser | undefined
     let stealthy: Browser | undefined
 
-    try {
-      await t.step('passthrough proxies Playwright unchanged', async () => {
-        plain = await chromium.launch({ plugins: [] })
-        const page = await plain.newPage()
+    /** What actually crossed to the browser for one plugin configuration. */
+    const wireOf = async (plugins: PluginList) => {
+      const browser = await chromium.launch({ plugins, debug: 'proxy' })
+      try {
+        const page = await browser.newPage()
         await page.goto(origin, { waitUntil: 'domcontentloaded' })
+        const proxy = rpc(await browser.newBrowserCDPSession())
+        return (await proxy.debug()).forwarded
+      } finally {
+        await browser.close().catch(() => {})
+      }
+    }
 
-        assertEquals(await page.title(), 'Smoke Page')
-        assertEquals(await page.evaluate(() => 6 * 7), 42)
-        await page.click('#btn')
-        assertEquals(await page.textContent('#heading'), 'clicked')
-      })
-
+    try {
       await t.step(
-        'Playwright does ask the browser to enable the runtime',
+        "plugins: 'none' proxies Playwright unchanged",
         async () => {
-          const asked: string[] = []
-          const browser = await chromium.launch({
-            plugins: [tap(asked, 0)],
-          })
-          const page = await browser.newPage()
+          // The transparency this asserts is a property of ProxyConnection, not
+          // of core, so it needs a genuinely empty session. `plugins: []` no
+          // longer is one.
+          plain = await chromium.launch({ plugins: 'none' })
+          const page = await plain.newPage()
           await page.goto(origin, { waitUntil: 'domcontentloaded' })
-          await browser.close()
 
-          assert(
-            asked.includes('Runtime.enable'),
-            `expected Playwright to send Runtime.enable, saw: ${[
-              ...new Set(asked),
-            ]}`,
-          )
-          await plain!.close()
+          assertEquals(await page.title(), 'Smoke Page')
+          assertEquals(await page.evaluate(() => 6 * 7), 42)
+          await page.click('#btn')
+          assertEquals(await page.textContent('#heading'), 'clicked')
+          await plain.close()
           plain = undefined
         },
       )
 
+      await t.step('core-only is not stock', async () => {
+        // Nothing else proves core ran: `plugins: []` installs no surfaces, so a
+        // page-side assertion would be indistinguishable from a plain browser.
+        // The wire is where the difference is.
+        const relay = await wireOf('none')
+        assert(
+          relay['Runtime.enable'] > 0,
+          'without this control the assertion below proves nothing: Playwright ' +
+            `must be sending Runtime.enable at all, saw ${
+              Object.keys(relay).length
+            } methods`,
+        )
+
+        const coreOnly = await wireOf([])
+        assertEquals(
+          coreOnly['Runtime.enable'],
+          undefined,
+          'plugins: [] installs core, and core must stop Runtime.enable ' +
+            'reaching the browser',
+        )
+        assert(
+          Object.keys(coreOnly).length > 0,
+          'a core-only session still drives the browser',
+        )
+      })
+
       await t.step(
-        'stealth suppresses Runtime.enable while both worlds work',
+        'a core-only session has an identity, and only core carries it',
         async () => {
-          const asked: string[] = []
-          const forwarded: string[] = []
-          stealthy = await chromium.launch({
-            // stealth sits at priority 100, so `asked` sees the raw client stream and
-            // `forwarded` only sees what survived it.
-            plugins: [tap(asked, 200), stealth(), tap(forwarded, 0)],
-          })
+          // Core `flags` reaches `locale` and the window size on the command
+          // line, which is a rung no page patch can reach (§4.2). Everything
+          // else is a claim the real browser is currently contradicting, and the
+          // uncovered line saying so is the deliverable.
+          const browser = await chromium.launch({ plugins: [] })
+          try {
+            const page = await browser.newPage()
+            await page.goto(origin, { waitUntil: 'domcontentloaded' })
+            const real = await page.evaluate(() => navigator.userAgent)
+            const { profile, coverage } = await rpc(
+              await browser.newBrowserCDPSession(),
+            ).profile()
+
+            assert(profile, 'a session with plugins always has an identity')
+            assertEquals(profile.source, 'generate')
+
+            // Reconciliation is the assertion with teeth: a page feature-detects,
+            // so the claimed version has to be the version of the binary that
+            // actually started, which no loader could have known.
+            assertEquals(
+              String(profile.chrome),
+              real.match(/Chrome\/(\d+)/)?.[1],
+              `profile claims Chrome ${profile.chrome}, binary is ${real}`,
+            )
+            assert(
+              !profile.userAgent.includes('Headless'),
+              `the drawn UA kept a headless tell: ${profile.userAgent}`,
+            )
+
+            assertEquals(coverage!.read, {
+              locale: ['flags'],
+              viewport: ['flags'],
+              chromeHeight: ['flags'],
+            })
+            for (const field of ['userAgent', 'gpu', 'fonts', 'timezone']) {
+              assert(
+                coverage!.uncovered.includes(field),
+                `${field} should be uncovered until a surface carries it`,
+              )
+            }
+          } finally {
+            await browser.close().catch(() => {})
+          }
+        },
+      )
+
+      await t.step('a pinned id re-draws the same machine', async () => {
+        const drawn = async (id: string) => {
+          const browser = await chromium.launch({ profile: { id } })
+          try {
+            const { profile } = await rpc(await browser.newBrowserCDPSession())
+              .profile()
+            return profile!
+          } finally {
+            await browser.close().catch(() => {})
+          }
+        }
+
+        // Deliberately no "a different id draws a different machine" assertion:
+        // two ids landing on the same row is the tables working. Common machines
+        // are supposed to repeat (§2.5), so that comparison is flaky by design.
+        assertEquals(await drawn('smoke-pinned'), await drawn('smoke-pinned'))
+        assertEquals((await drawn('smoke-pinned')).id, 'smoke-pinned')
+
+        const relay = await chromium.launch({ plugins: 'none' })
+        try {
+          const { profile } = await rpc(await relay.newBrowserCDPSession())
+            .profile()
+          // A transparent relay claims nothing, so there is nothing to report.
+          assertEquals(profile, null)
+        } finally {
+          await relay.close().catch(() => {})
+        }
+      })
+
+      await t.step(
+        'a launch plugin buys a process, and the fleet shares one otherwise',
+        async () => {
+          const seen = async (plugins: PluginList) => {
+            const browser = await chromium.launch({ plugins })
+            try {
+              const control = rpc(await browser.newBrowserCDPSession())
+              const { profile } = await control.profile()
+              const page = await browser.newPage()
+              await page.goto(origin, { waitUntil: 'domcontentloaded' })
+              return {
+                id: profile!.id,
+                timezone: profile!.timezone,
+                launch: (await control.debug()).launch.flags,
+                inPage: await page.evaluate(() =>
+                  Intl.DateTimeFormat().resolvedOptions().timeZone
+                ),
+              }
+            } finally {
+              await browser.close().catch(() => {})
+            }
+          }
+
+          // Two sessions that asked for nothing land on the same pooled process,
+          // so they are the same person — including the same canvas hash (§2.7).
+          const first = await seen([stealth()])
+          const second = await seen([stealth()])
+          assertEquals(first.id, second.id)
+          assertEquals(first.launch, second.launch)
+          assert(
+            first.launch.some((f) => f.startsWith('--lang=')),
+            `core flags puts the profile locale on the command line: ${first.launch}`,
+          )
+
+          // A launch plugin is per-process, so it costs a process (§3.3), and
+          // `TZ` makes the browser genuinely be where the profile says it is
+          // rather than being told to say so.
+          const own = await seen([stealth(), clock()])
+          assertNotEquals(own.id, first.id)
+          assertEquals(own.inPage, own.timezone)
+        },
+      )
+
+      await t.step(
+        'core suppresses Runtime.enable while both worlds work',
+        async () => {
+          stealthy = await chromium.launch({ plugins: [stealth()] })
           const page = await stealthy.newPage()
           await page.goto(origin, { waitUntil: 'domcontentloaded' })
-
-          assert(asked.includes('Runtime.enable'), 'the client asked for it')
-          assert(
-            !forwarded.includes('Runtime.enable'),
-            'Runtime.enable must never reach the browser',
-          )
 
           // Main world.
           assertEquals(await page.evaluate(() => 6 * 7), 42)
@@ -277,6 +425,7 @@ Deno.test({
         // `Runtime.enable` the binding is gone after the next navigation, and
         // scoping it to this world needs `Runtime.enable` as well.
         const world = definePlugin({
+          kind: 'protocol',
           name: 'private-world',
           setup: (_cfg, ctx) => ({
             onTargetAttached: async (target) => {
@@ -484,16 +633,32 @@ Deno.test({
             )
 
             // The same picture as the trace lines, but assertable from a test.
+            // `stealth` is a preset now, so what a session reports is what it
+            // expanded to (§8.5): protocol plugins in `plugins`, surfaces in
+            // `surfaces`, and nothing anywhere called "stealth".
             const debug = await proxy.debug()
-            const stealthy = debug.plugins.find((p) => p.name === 'stealth')
+            const names = debug.plugins.map((p) => p.name)
+            const recording = debug.plugins.find((p) => p.name === 'recorder')
+            assert(recording, `expected recorder in ${names}`)
             assert(
-              stealthy,
-              `expected stealth in ${debug.plugins.map((p) => p.name)}`,
+              (recording.calls.onRequest ?? 0) > 0,
+              'recorder onRequest should have been counted',
             )
-            assert(
-              (stealthy.calls.onRequest ?? 0) > 0,
-              'stealth onRequest should have been counted',
-            )
+            assertEquals(names.includes('stealth'), false)
+            for (
+              const surface of [
+                'navigator',
+                'timezone',
+                'canvas',
+                'webgl',
+                'screen',
+              ]
+            ) {
+              assert(
+                debug.surfaces.includes(surface),
+                `expected ${surface} in ${debug.surfaces}`,
+              )
+            }
           } finally {
             await browser.close().catch(() => {})
           }
@@ -549,6 +714,7 @@ Deno.test({
         async () => {
           const url = `${origin}/second`
           const opener = definePlugin({
+            kind: 'protocol',
             name: 'opener',
             setup: (_cfg, ctx) => ({
               async onSessionStart() {
@@ -632,7 +798,7 @@ Deno.test({
         name: 'a real detector grades stealth as human and plain as a bot',
         ignore: !online,
         async fn() {
-          const verdictOf = async (plugins: ConfiguredPlugin[]) => {
+          const verdictOf = async (plugins: PluginList) => {
             // A verdict is only evidence about this plugin set if nothing else is
             // attached to the browser being graded, so each scan gets its own
             // process rather than sharing one with the sessions above.
@@ -683,12 +849,25 @@ Deno.test({
 
           // Without this control the assertion above proves nothing: it would pass
           // just as well if the detector had stopped noticing headless Chrome.
-          const bot = await verdictOf([])
+          const bot = await verdictOf('none')
           assertEquals(
             bot.verdict,
             'Robot',
             `the detector no longer flags plain headless Chrome — got "${bot.verdict}" ` +
               `for ${bot.ua}, so the check above has lost its teeth`,
+          )
+
+          // Core-only is the third configuration and its grade is published as
+          // measured rather than as hoped (§8.6). Core keeps the session
+          // controllable and unannounced on the wire; it does not make it look
+          // like a person, because the surface that removes `HeadlessChrome` from
+          // the User-Agent is authored rather than core (decision 6).
+          const bare = await verdictOf([])
+          assertEquals(
+            bare.verdict,
+            'Robot',
+            `core-only's grade changed — README documents it as "Robot", got ` +
+              `"${bare.verdict}" for ${bare.ua}. Re-measure before rewording.`,
           )
         },
       })

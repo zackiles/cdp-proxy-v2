@@ -3,11 +3,19 @@
   "version": "0.0.1",
   "exports": "./src/mod.ts",
   "tasks": {
-    "dev": "deno run --watch --allow-all ./src/main.ts",
+    // `--plugin <name>` opens a headful page with it installed and a pinned
+    // profile; without one it runs the standalone proxy, as it always did.
+    "dev": "deno run --watch --allow-all ./tools/dev.ts",
+    "lint": "deno lint",
     "test": "deno test --allow-all test/**/*.test.ts",
     // The end-to-end test needs a real browser; skip it for a fast inner loop.
     "test:unit": "deno test --allow-all --ignore=test/smoke.test.ts test/**/*.test.ts",
-    "smoke": "deno test --allow-all test/smoke.test.ts"
+    "smoke": "deno test --allow-all test/smoke.test.ts",
+    // Record a corpus row from a real Chrome on hardware you own (§2.3).
+    "capture": "deno run --allow-all ./tools/capture.ts",
+    // The author's loop (§9.7): what exists, scaffold a new one, iterate on it.
+    "plugins": "deno run --allow-all ./tools/plugins.ts",
+    "new": "deno run --allow-all ./tools/new.ts"
   },
   "license": "MIT",
   "description": "A stealthy, plugin-configurable Playwright wrapper. Fronts Chrome's DevTools Protocol on the wire so plugins can rewrite CDP traffic per session, while callers keep using stock Playwright objects.",
@@ -33,10 +41,27 @@
   },
   "compilerOptions": {
     "strict": true,
+    // The page-side helper set (§4.1), which surfaces use without importing.
+    "types": [
+      "./src/page.d.ts"
+    ],
     "lib": [
       "deno.window",
       "deno.ns",
+      // `Deno.lint`, which the page-function rule in `tools/lint.ts` is built on.
+      "deno.unstable",
       "dom"
+    ]
+  },
+  "lint": {
+    "include": [
+      "src/",
+      "plugins/",
+      "test/",
+      "tools/"
+    ],
+    "plugins": [
+      "./tools/lint.ts"
     ]
   },
   "fmt": {

@@ -3,7 +3,9 @@
  * Handles browser lifecycle including launch, connection, and graceful shutdown.
  */
 import { launch, type LaunchedChrome, Launcher } from 'chrome-launcher'
-import { BROWSER_LAUNCH_FLAGS, HEADLESS_FLAG } from './constants.ts'
+import { HEADLESS_FLAG } from './constants.ts'
+import { BASELINE } from './core/flags.ts'
+import type { BrowserInfo, LaunchSpec } from './types.ts'
 import {
   asError,
   killProcessOnPortByName,
@@ -21,21 +23,68 @@ class BrowserManager {
   browserHost: string
   browserPort: number
   browserExecutablePath: string
+  /**
+   * What the binary turned out to be, read from the same `/json/version` call
+   * that discovers the WebSocket URL. Profiles are reconciled against this
+   * (§2.6), and getting it here costs nothing: no loader can know which binary
+   * the pool launched, and asking over CDP later would put an extra round trip
+   * in front of every connection.
+   */
+  version: { product?: string; userAgent?: string } = {}
+  /**
+   * The resolved `launch` contribution this process starts from (§3.1). Absent
+   * means the baseline in `constants.ts`, which is what a pool with no profile
+   * to draw against — a remote endpoint, or a test — gets.
+   */
+  readonly spec?: LaunchSpec
 
   /**
    * Creates a new BrowserManager instance
    * @param browserHost - Host address for remote debugging
    * @param browserPort - Port for remote debugging connection
    * @param browserExecutablePath - Path to Browser executable
+   * @param spec - Merged flags, env, and data dir from the `launch` plugins
    */
   constructor(
     browserHost: string,
     browserPort: number,
     browserExecutablePath: string,
+    spec?: LaunchSpec,
   ) {
     this.browserHost = browserHost
     this.browserPort = browserPort
     this.browserExecutablePath = browserExecutablePath
+    this.spec = spec
+  }
+
+  /** What the process turned out to be, for `onStart` and reconciliation (§3.2). */
+  get info(): BrowserInfo {
+    return {
+      pid: this.browser?.pid ?? 0,
+      host: this.browserHost,
+      port: this.browserPort,
+      userDataDir: this.spec?.userDataDir,
+      flags: this.#flags(),
+      executablePath: this.browserExecutablePath,
+      ...this.version,
+    }
+  }
+
+  /**
+   * DANGER: the reserved flags are appended here, after the plugin contribution,
+   * and `src/launch.ts` refuses a plugin that returns one. Both halves are
+   * needed: the refusal is the diagnosable one, and this is what makes it true.
+   */
+  #flags(): string[] {
+    return [
+      ...this.spec?.flags ?? BASELINE,
+      ...(Config.get('headless') ? [HEADLESS_FLAG] : []),
+      ...(this.spec ? [] : [Config.get('cdpLogLevelFlag')]),
+      `--remote-debugging-port=${this.browserPort}`,
+      `--remote-debugging-address=${this.browserHost}`,
+      '--disable-gcm',
+      '--disable-component-update',
+    ]
   }
 
   /**
@@ -57,22 +106,17 @@ class BrowserManager {
       this.browser = await launch({
         chromePath: this.browserExecutablePath,
         port: Number(this.browserPort),
-        userDataDir: false,
+        userDataDir: this.spec?.userDataDir ?? false,
+        envVars: this.spec?.env
+          ? { ...Deno.env.toObject(), ...this.spec.env }
+          : undefined,
         logLevel: Config.get('launcherLogLevel'),
         // Chrome can take several seconds to open the CDP port on macOS; a tiny
         // retry budget was the "finicky startup" race. 50 * 500ms = ~25s.
         maxConnectionRetries: 50,
         connectionPollInterval: 500,
         startingUrl: undefined,
-        chromeFlags: [
-          ...BROWSER_LAUNCH_FLAGS,
-          ...(Config.get('headless') ? [HEADLESS_FLAG] : []),
-          Config.get('cdpLogLevelFlag'),
-          `--remote-debugging-port=${this.browserPort}`,
-          `--remote-debugging-address=${this.browserHost}`,
-          '--disable-gcm',
-          '--disable-component-update',
-        ],
+        chromeFlags: this.#flags(),
         handleSIGINT: false, // The proxy handles it's own SIGINT that cleans up the browser instance
       })
 
@@ -116,8 +160,9 @@ class BrowserManager {
     // Default flags from chrome-launcher
     const defaultFlags = Launcher.defaultFlags()
 
+    const contributed = this.spec?.flags ?? BASELINE
     const customFlagMap = new Map(
-      BROWSER_LAUNCH_FLAGS.map((flag) => {
+      contributed.map((flag) => {
         const [name, value] = flag.split('=')
         return [name, value]
       }),
@@ -130,7 +175,7 @@ class BrowserManager {
     })
 
     // User supplied flags to the proxy config
-    finalFlags.push(...BROWSER_LAUNCH_FLAGS)
+    finalFlags.push(...contributed)
     if (Config.get('headless')) finalFlags.push(HEADLESS_FLAG)
 
     // Odds and ends
@@ -169,12 +214,16 @@ class BrowserManager {
         throw new Error(`CDP endpoint returned HTTP ${response.status}`)
       }
 
-      const { webSocketDebuggerUrl } = await response.json()
-      if (!webSocketDebuggerUrl) {
+      const info = await response.json()
+      if (!info.webSocketDebuggerUrl) {
         throw new Error('CDP endpoint returned no WebSocket URL')
       }
+      this.version = {
+        product: info.Browser,
+        userAgent: info['User-Agent'],
+      }
 
-      return webSocketDebuggerUrl
+      return info.webSocketDebuggerUrl
     } catch (cause: unknown) {
       clearTimeout(timeoutId)
       throw new Error(

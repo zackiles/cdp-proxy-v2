@@ -27,6 +27,20 @@ export type ConfigOptions = {
   pluginsDirectory: string
   /** Plugin trace filter, e.g. `1`, `stealth`, `stealth:Runtime.*`; '' disables. */
   debug: string
+  /**
+   * Pin every session to one identity, by id (§2.3). The id is the seed, so the
+   * same value re-draws the same machine — which is how a failure is re-opened
+   * tomorrow on the machine it failed on. '' draws fresh.
+   */
+  profile: string
+  /**
+   * How many identities the fleet has. Defaults to the pool size — one per slot,
+   * so the default never correlates two sessions that did not ask to be
+   * correlated (§2.7).
+   */
+  profiles: number
+  /** Path to a JSONL corpus of captured fingerprints; '' uses `generate`. */
+  corpus: string
   proxyLogLevel:
     | 'silent'
     | 'error'
@@ -185,6 +199,9 @@ class Config {
       // server's job, not something an embedded SDK should do behind your back.
       pluginsDirectory: env.CDP_PLUGINS_DIRECTORY || '',
       debug: env.CDP_DEBUG || '',
+      profile: env.CDP_PROFILE || '',
+      profiles: Number(env.CDP_PROFILES) || 0,
+      corpus: env.CDP_CORPUS || '',
       proxyLogLevel,
       proxyLogTags: env.CDP_PROXY_LOG_TAGS || '',
       // Derived values that don't come from env

@@ -1,5 +1,5 @@
 /**
- * @module plugins/recorder
+ * @module plugins/protocol/recorder
  * @description Records a session's CDP traffic and serves it back over the custom
  * RPC namespace. Doubles as the worked example for plugin authors: it touches
  * every message hook, keeps per-session state in the factory closure, and answers
@@ -12,8 +12,8 @@
  * ```
  */
 
-import { definePlugin } from '../src/plugin.ts'
-import type { PluginFactory } from '../src/types.ts'
+import { definePlugin } from '../../src/plugin.ts'
+import type { PluginFactory } from '../../src/types.ts'
 
 export interface RecorderOptions {
   /** Newest-N entries to keep; older ones are dropped. */
@@ -33,6 +33,7 @@ export interface Entry {
 export const recorder: PluginFactory<RecorderOptions> = definePlugin<
   RecorderOptions
 >({
+  kind: 'protocol',
   name: 'recorder',
   defaults: { limit: 5_000, events: false },
   // Only observes, so losing it costs visibility rather than correctness.

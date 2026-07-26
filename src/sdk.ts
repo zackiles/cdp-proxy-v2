@@ -21,7 +21,13 @@ import { Logger } from './logger.ts'
 import type { Debug } from './debug.ts'
 import { stealth } from '../plugins/stealth.ts'
 import { PROXY_METHOD_PREFIX, SESSION_TOKEN_HEADER } from './types.ts'
-import type { ConfiguredPlugin, IsolationMode } from './types.ts'
+import type {
+  Constraint,
+  Coverage,
+  IsolationMode,
+  PluginList,
+  Profile,
+} from './types.ts'
 
 const log = Logger.get('sdk')
 
@@ -30,10 +36,37 @@ export interface LaunchOptions {
   headless?: boolean
   /**
    * Per-session plugin set (the primary knob). Defaults to `[stealth()]` — this
-   * is a stealthy Playwright, so you get that without asking. Pass your own list
-   * to change it, or `[]` for a plain pass-through proxy.
+   * is a stealthy Playwright, so you get that without asking.
+   *
+   * Three configurations, one option (§8.6):
+   *
+   * ```ts
+   * chromium.launch()                    // the stealth preset, plus core
+   * chromium.launch({ plugins: [] })     // core only
+   * chromium.launch({ plugins: 'none' }) // nothing at all — a transparent relay
+   * ```
+   *
+   * An element may be a preset, which expands to several plugins. Core (§8.3) is
+   * installed for every value but `'none'`, so `[]` is a session that is not
+   * announced on the wire and presents the real machine honestly, with no
+   * fingerprint spoofing to get wrong.
    */
-  plugins?: ConfiguredPlugin[]
+  plugins?: PluginList
+  /**
+   * What to ask the profile loaders for (§2.4).
+   *
+   * ```ts
+   * chromium.launch({ profile: { os: ['Windows'], minChrome: 140 } })
+   * ```
+   *
+   * DANGER: this is a **query**, not an override. A loader returns a whole
+   * coherent row that satisfies it, or the next loader tries. There is
+   * deliberately no way to change one field of a drawn profile: patching `os` to
+   * `'Windows'` on a row drawn from macOS is how a session ends up claiming an
+   * Apple GPU under a Windows User-Agent. For a variant, ask for a tighter
+   * constraint.
+   */
+  profile?: Constraint
   /** Isolation granularity for sessions spawned from this browser. */
   isolation?: IsolationMode
   /** Playwright slow-motion (ms) for headful debugging. */
@@ -101,6 +134,22 @@ async function connect(opts: LaunchOptions): Promise<Browser> {
     )
   }
 
+  // For one release, since anyone running the proxy as a transparent debugging
+  // relay gets a different browser after this change and should find that out
+  // from a log line rather than from a detector.
+  if (Array.isArray(opts.plugins) && opts.plugins.length === 0) {
+    log.warn(
+      'plugins: [] now means core-only, not pass-through — the session is not ' +
+        "announced on the wire. Pass plugins: 'none' for a transparent relay.",
+    )
+  }
+  if (opts.plugins === 'none') {
+    log.warn(
+      "plugins: 'none' is a diagnostic, not a supported production mode: the " +
+        'browser announces itself on the wire.',
+    )
+  }
+
   const token = await proxy.register(
     opts.plugins ?? [stealth()],
     opts.isolation,
@@ -110,6 +159,7 @@ async function connect(opts: LaunchOptions): Promise<Browser> {
       : opts.debug === true
       ? '*'
       : opts.debug || '',
+    opts.profile,
   )
   return await pwChromium.connectOverCDP(proxy.endpoint, {
     headers: { [SESSION_TOKEN_HEADER]: token },
@@ -152,15 +202,41 @@ export interface Hello {
   sessionToken: string
   plugins: string[]
   upstream: string
+  /** Every `Proxy.*` method this session answers, the runtime's and the plugins' (§7.3). */
+  rpc: string[]
 }
 
 /** The picture `CDP_DEBUG` traces paint, as data a test can assert on. */
 export type Snapshot = ReturnType<Debug['snapshot']>
 
+/**
+ * The sealed identity and who read what (§2.8). `null` for `plugins: 'none'`,
+ * which claims nothing about the machine.
+ *
+ * `profile` is the row without `noise`, which does not survive the wire; derive
+ * jitter from `seed` if a test needs to predict it.
+ */
+export interface Identity {
+  profile: Omit<Profile, 'noise'> | null
+  coverage: Coverage | null
+}
+
 /** Typed access to the reserved `Proxy.*` methods. */
 export interface RPC {
   hello(): Promise<Hello>
   debug(): Promise<Snapshot>
+  /** The drawn identity and its coverage report. */
+  profile(): Promise<Identity>
+  /**
+   * Retire this session's identity so no loader hands it out again (§2.7).
+   *
+   * Only the code driving the page can recognize a block, so this is the
+   * automator's call rather than the runtime's. `told` names the loaders that
+   * did something about it: `remote` persists the withdrawal, `corpus` drops the
+   * row for the life of the process, and `generate` and `pin` have no state to
+   * withdraw from, so an empty list means nothing was tracking the row.
+   */
+  burn(reason: string): Promise<{ burnt: boolean; told: string[] }>
   /** Any other `Proxy.*` method, including ones a plugin answers itself. */
   send<T>(method: string, params?: Record<string, unknown>): Promise<T>
 }
@@ -191,6 +267,9 @@ export function rpc(cdp: CDPSession): RPC {
   return {
     hello: () => send<Hello>('Proxy.hello'),
     debug: () => send<Snapshot>('Proxy.debug'),
+    profile: () => send<Identity>('Proxy.profile'),
+    burn: (reason) =>
+      send<{ burnt: boolean; told: string[] }>('Proxy.burn', { reason }),
     send,
   }
 }

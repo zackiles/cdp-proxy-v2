@@ -1,8 +1,12 @@
 /**
  * @module plugin
- * @description The plugin platform (Persona B). Authors call {@link definePlugin}
- * to produce a typed, configurable factory; the runtime instantiates one isolated
- * instance per session and drives it through the {@link Pipeline}.
+ * @description The plugin platform. Authors call {@link definePlugin} to produce a
+ * typed, configurable factory of any of the five kinds; the runtime partitions a
+ * session's set by kind, resolves each partition in phase order, and drives the
+ * on-wire ones through the {@link Pipeline}.
+ *
+ * `kind` is a field rather than a per-kind constructor, so the API stops growing
+ * with the taxonomy: a sixth kind is a new value, not a sixth export.
  */
 
 import type {
@@ -12,12 +16,17 @@ import type {
   CDPResponse,
   CDPTarget,
   ConfiguredPlugin,
+  Kind,
   PluginContext,
   PluginDefinition,
   PluginFactory,
   PluginHooks,
+  PluginSet,
+  PresetDefinition,
+  PresetFactory,
   RequestOutcome,
 } from './types.ts'
+import { KINDS } from './types.ts'
 import { Logger } from './logger.ts'
 import { Debug, type Outcome } from './debug.ts'
 import { asError } from './utils.ts'
@@ -43,45 +52,168 @@ function compileMatcher(globs?: string[]): (method: string) => boolean {
  * pass in a session's `plugins: [...]`. Each factory call captures resolved
  * options; the runtime calls `setup` once per session for isolated state.
  */
-export function definePlugin<Options extends Record<string, unknown>>(
-  def: PluginDefinition<Options>,
-): PluginFactory<Options> {
-  const matches = compileMatcher(def.match)
+export function definePlugin<
+  Options extends Record<string, unknown>,
+  Config = undefined,
+>(def: PluginDefinition<Options, Config>): PluginFactory<Options> {
+  const kind: Kind = def.kind ?? 'protocol'
+  const match = 'match' in def ? def.match : undefined
+  const urls = 'urls' in def ? def.urls : undefined
+  const scope = 'scope' in def ? def.scope : undefined
+  const matches = compileMatcher(match)
+
   const factory = ((options?: Partial<Options>): ConfiguredPlugin => {
     const resolved = { ...(def.defaults ?? {}), ...(options ?? {}) } as Options
     return {
+      kind,
       name: def.name,
       options: resolved as Record<string, unknown>,
       priority: def.priority ?? 0,
       matches,
-      match: def.match,
+      match,
+      urls,
+      scope,
       optional: def.optional,
-      setup: (ctx: PluginContext) => def.setup(resolved, ctx),
+      // deno-lint-ignore no-explicit-any
+      setup: (ctx: any) => (def.setup as any)(resolved, ctx),
     }
   }) as PluginFactory<Options>
   factory.pluginName = def.name
+  factory.kind = kind
   return factory
+}
+
+/**
+ * A named list of configured plugins — the mechanism for defaults, and how
+ * `stealth()` survives being broken up into surfaces (§8.5).
+ *
+ * It stays a separate constructor because a preset is not a plugin with a sixth
+ * kind: it expands to plugins, so giving it a `kind` would put a value in the
+ * `Kind` union that the runtime never installs.
+ */
+export function definePreset<Options extends Record<string, unknown>>(
+  def: PresetDefinition<Options>,
+): PresetFactory<Options> {
+  const factory = ((
+    options?: Partial<Options & { without?: string[] }>,
+  ): ConfiguredPlugin[] => {
+    const cfg = {
+      ...(def.defaults ?? {}),
+      ...(options ?? {}),
+    } as Options & { without?: string[] }
+    const without = new Set(cfg.without ?? [])
+    return def.plugins(cfg).filter((p) => !without.has(p.name))
+  }) as PresetFactory<Options>
+  factory.presetName = def.name
+  return factory
+}
+
+/** Expand presets so the runtime only ever sees a flat list (§8.6). */
+export function flatten(
+  list: (ConfiguredPlugin | ConfiguredPlugin[])[],
+): ConfiguredPlugin[] {
+  return list.flat()
+}
+
+/**
+ * Group a flat list by kind, refusing duplicate names within a kind.
+ *
+ * The duplicate check is the actual defence against corsac's two `math.ts`
+ * files: identity is `name`, a path is inert, so two plugins claiming the same
+ * subject collide here rather than silently shadowing each other (§10.1).
+ */
+export function partition(plugins: ConfiguredPlugin[]): PluginSet {
+  const set = Object.fromEntries(
+    KINDS.map((k) => [k, [] as ConfiguredPlugin[]]),
+  ) as PluginSet
+  const seen = new Set<string>()
+  for (const plugin of plugins) {
+    const id = `${plugin.kind}/${plugin.name}`
+    if (seen.has(id)) {
+      throw new Error(
+        `two ${plugin.kind} plugins are both named "${plugin.name}"; ` +
+          'a name must be unique within its kind',
+      )
+    }
+    seen.add(id)
+    set[plugin.kind].push(plugin)
+  }
+  return set
+}
+
+/**
+ * Resolution order within a kind: core keeps the end of the order its job needs
+ * and no `priority` can displace it (§8.4), then higher priority runs earlier.
+ */
+export function order(plugins: ConfiguredPlugin[]): ConfiguredPlugin[] {
+  const rank = (p: ConfiguredPlugin) =>
+    p.pinned === 'first' ? 2 : p.pinned === 'last' ? 0 : 1
+  return [...plugins].sort((a, b) =>
+    rank(b) - rank(a) || b.priority - a.priority
+  )
 }
 
 interface InstalledPlugin {
   name: string
+  kind: Kind
   priority: number
+  pinned?: 'first' | 'last'
   matches: (method: string) => boolean
   hooks: PluginHooks
   ctx: PluginContext
 }
 
 /**
- * A per-session chain of installed plugins. Runs hooks in priority order with
- * per-hook error isolation; a throwing plugin never breaks message flow.
+ * A per-session chain of installed `protocol` plugins. Runs hooks in resolution
+ * order with per-hook error isolation; a throwing plugin never breaks message
+ * flow.
  */
 export class Pipeline {
   #plugins: InstalledPlugin[] = []
   readonly #debug: Debug
+  /** Declared `Proxy.*` methods, by name, resolved once at install (§7.3). */
+  readonly #rpc: Map<string, InstalledPlugin>
 
-  private constructor(plugins: InstalledPlugin[], debug: Debug) {
+  private constructor(
+    plugins: InstalledPlugin[],
+    debug: Debug,
+    rpc = new Map<string, InstalledPlugin>(),
+  ) {
     this.#plugins = plugins
     this.#debug = debug
+    this.#rpc = rpc
+  }
+
+  /** The custom methods this session answers, for `Proxy.hello` (§7.3). */
+  get rpc(): string[] {
+    return [...this.#rpc.keys()].sort()
+  }
+
+  /**
+   * Answer a declared method, or `undefined` if nothing claimed it.
+   *
+   * Deliberately not routed through `onRequest`: a declared method bypasses
+   * `match`, so a plugin that narrowed itself to `Page.*` still answers its own
+   * RPC — which is the trap the declaration replaces.
+   */
+  async answer(
+    method: string,
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown> | undefined> {
+    const owner = this.#rpc.get(method)
+    if (!owner) return undefined
+    const run = await this.#guard(
+      owner,
+      'rpc',
+      method,
+      () => owner.hooks.rpc![method](params, owner.ctx),
+    )
+    return run.ok ? run.value : {
+      error: {
+        code: -32000,
+        message: `${owner.name} failed to answer ${method}`,
+      },
+    }
   }
 
   /**
@@ -96,12 +228,14 @@ export class Pipeline {
   ): Promise<Pipeline> {
     const installed: InstalledPlugin[] = []
     const failed: string[] = []
-    for (const p of plugins) {
+    for (const p of order(plugins)) {
       try {
         const ctx = context(p.name)
         installed.push({
           name: p.name,
+          kind: p.kind,
           priority: p.priority,
+          pinned: p.pinned,
           matches: p.matches,
           hooks: await p.setup(ctx),
           ctx,
@@ -109,7 +243,8 @@ export class Pipeline {
       } catch (err) {
         const error = asError(err)
         Logger.get(`plugin:${p.name}`).error('setup failed', { error })
-        if (!p.optional) failed.push(`${p.name} (${error.message})`)
+        // Core is never optional and there is no degraded mode for it (§9.6).
+        if (!p.optional || p.pinned) failed.push(`${p.name} (${error.message})`)
       }
     }
     // A hook that throws on one message is recoverable, so those stay isolated.
@@ -119,12 +254,31 @@ export class Pipeline {
     if (failed.length > 0) {
       throw new Error(`plugin setup failed: ${failed.join(', ')}`)
     }
-    installed.sort((a, b) => b.priority - a.priority)
 
-    const pipeline = new Pipeline(installed, debug)
+    // Registered here rather than matched per message, which is what makes a
+    // collision an error at session start instead of a coin toss at call time
+    // (§7.3). Two plugins claiming one name is the failure the declaration
+    // exists to catch, so it fails the session like any other setup failure.
+    const rpc = new Map<string, InstalledPlugin>()
+    for (const p of installed) {
+      for (const method of Object.keys(p.hooks.rpc ?? {})) {
+        const held = rpc.get(method)
+        if (held) {
+          throw new Error(
+            `plugin setup failed: ${p.name} and ${held.name} both declare ` +
+              `${method}, and only one of them can answer it`,
+          )
+        }
+        rpc.set(method, p)
+      }
+    }
+
+    const pipeline = new Pipeline(installed, debug, rpc)
     debug.installed(installed.map((p) => ({
       name: p.name,
+      kind: p.kind,
       priority: p.priority,
+      pinned: p.pinned,
       match: plugins.find((c) => c.name === p.name)?.match,
       hooks: Object.keys(p.hooks),
     })))
