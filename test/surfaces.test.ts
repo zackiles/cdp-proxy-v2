@@ -15,6 +15,7 @@ import { audio } from '../plugins/surface/media/audio.ts'
 import { codecs } from '../plugins/surface/media/codecs.ts'
 import { devices } from '../plugins/surface/media/devices.ts'
 import { webrtc } from '../plugins/surface/network/webrtc.ts'
+import { fonts } from '../plugins/surface/platform/fonts.ts'
 import { permissions } from '../plugins/surface/permissions.ts'
 import { battery } from '../plugins/surface/battery.ts'
 import { geo } from '../plugins/surface/locale/geo.ts'
@@ -327,6 +328,122 @@ Deno.test({
             ungranted,
           )
           assertEquals(it.coverage.uncovered.includes('geo'), false)
+        },
+      )
+
+      await t.step(
+        'fonts: a family the profile does not claim never reaches layout',
+        async () => {
+          // The probe a detector actually runs, and the one the canvas patch
+          // alone never saw: lay the same string out in the font under test and
+          // in a generic, and call the font installed if the widths differ.
+          // Nothing about it goes through a measurement API.
+          const probe = (families: string[]) => {
+            const width = (spec: string) => {
+              const span = document.createElement('span')
+              span.style.position = 'absolute'
+              span.style.left = '-9999px'
+              span.style.fontSize = '72px'
+              span.style.fontFamily = spec
+              span.textContent = 'mmmmmmmmmmlliWWWW'
+              document.body.appendChild(span)
+              const seen = span.offsetWidth
+              span.remove()
+              return seen
+            }
+            return families.filter((family) =>
+              ['monospace', 'sans-serif', 'serif'].some((base) =>
+                width(`${family},${base}`) !== width(base)
+              )
+            )
+          }
+
+          const CANDIDATES = [
+            'Avenir',
+            'Avenir Next',
+            'Helvetica Neue',
+            'Menlo',
+            'Apple Chancery',
+            'Futura',
+            'Optima',
+            'Didot',
+            'Copperplate',
+            'Gill Sans',
+            'Segoe UI',
+            'Calibri',
+            'Cambria',
+            'Consolas',
+            'DejaVu Sans',
+            'Liberation Sans',
+            'Ubuntu',
+            'FreeSans',
+          ]
+
+          await using bare = await harness({ plugins: [] })
+          const host = await bare.page.eval(probe, CANDIDATES)
+
+          // A profile claiming the host's own OS may have nothing to hide, so
+          // the assertion is only meaningful for the run whose claimed machine
+          // differs from the one underneath. One of these always is.
+          let proved = false
+          for (const os of ['Windows', 'Linux'] as const) {
+            await using it = await harness({
+              plugins: [fonts()],
+              profile: { os: [os] },
+            })
+            const claimed = new Set(it.profile.fonts ?? [])
+            const hidden = host.filter((family) => !claimed.has(family))
+            if (hidden.length === 0) continue
+            proved = true
+            assertEquals(
+              await it.page.eval(probe, hidden),
+              [],
+              `${os} profile still measures ${hidden.join(', ')}`,
+            )
+            // The other half: a family the profile does claim, and the machine
+            // really has, still measures as present. A surface that hides
+            // everything is not hiding anything.
+            const kept = host.filter((family) => claimed.has(family))
+            if (kept.length > 0) {
+              assertEquals(await it.page.eval(probe, kept), kept)
+            }
+          }
+          assert(proved, 'no candidate font was on the host to hide')
+        },
+      )
+
+      await t.step(
+        'fonts: what the page loaded itself, and what it reads back',
+        async () => {
+          await using it = await harness({
+            plugins: [fonts()],
+            profile: { os: ['Windows'] },
+          })
+          assertEquals(
+            await it.page.eval(() => {
+              const span = document.createElement('span')
+              span.style.fontFamily = 'Avenir, monospace'
+              return span.style.fontFamily
+            }),
+            // Filtering the declaration must not change what the page sees it
+            // set: a `style.fontFamily` that answers back the fallback is a
+            // cheaper tell than any width.
+            'Avenir, monospace',
+          )
+
+          // A site whose own `@font-face` measures as missing is a louder
+          // signal than any font list, so a face the page registered wins over
+          // the profile (§13.2).
+          assertEquals(
+            await it.page.eval(() => {
+              ;(document.fonts as unknown as { add(face: FontFace): void })
+                .add(new FontFace('PageOwnFace', 'url(data:font/woff2;base64,)'))
+              const span = document.createElement('span')
+              span.style.fontFamily = 'PageOwnFace, monospace'
+              return span.getAttribute('style')
+            }),
+            'font-family: PageOwnFace, monospace;',
+          )
         },
       )
 

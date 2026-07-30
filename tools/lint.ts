@@ -159,6 +159,7 @@ const GLOBALS = new Set([
   'ShadowRoot',
   'Element',
   'HTMLElement',
+  'SVGElement',
   'HTMLCanvasElement',
   'HTMLIFrameElement',
   'HTMLScriptElement',

@@ -13,6 +13,10 @@
     "smoke": "deno test --allow-all test/smoke.test.ts",
     // Record a corpus row from a real Chrome on hardware you own (§2.3).
     "capture": "deno run --allow-all ./tools/capture.ts",
+    // Grade stealth against BrowserScan + APIVoid; writes report.json by default.
+    // `--os Windows` on a Mac is the run worth grading: a leak of the real
+    // machine reads as a contradiction rather than as a coincidence.
+    "browserscan": "deno run --allow-all ./tools/browserscan.ts",
     // The author's loop (§9.7): what exists, scaffold a new one, iterate on it.
     "plugins": "deno run --allow-all ./tools/plugins.ts",
     "new": "deno run --allow-all ./tools/new.ts"
